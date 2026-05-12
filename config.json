@@ -4,5 +4,7 @@
   "target_user_open_id": "ou_e5be4d011457f53b9cb011cac0ce22f4",
   "chat_id": "oc_be478d78d093f4b06f78c9e3ad921db1",
   "state_dir": "~/.openclaw/workspace/memory/public-session",
-  "log_file": "~/.openclaw/workspace/memory/public-session/messages.log"
+  "log_file": "~/.openclaw/workspace/memory/public-session/messages.log",
+  "page_size": 50,
+  "tick_interval_seconds": 300
 }
