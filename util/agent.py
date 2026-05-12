@@ -76,18 +76,19 @@ def start_session(agent=DEFAULT_AGENT, session_id=DEFAULT_SESSION_ID):
     return data.get("status") == "ok"
 
 
-def call_agent(chat_history, agent=DEFAULT_AGENT,
+def call_agent(message, agent=DEFAULT_AGENT,
                session_id=DEFAULT_SESSION_ID, timeout=DEFAULT_TIMEOUT):
-    """发送聊天记录给子 agent，阻塞等待回复
+    """发送消息给子 agent，阻塞等待回复
 
-    将飞书聊天记录（消息列表）送入 OpenClaw agent 引擎，
-    让 agent 扮演 PM 角色执行任务，输出回复文本。
+    将一条消息送入 OpenClaw agent session，让 agent 扮演 PM 角色
+    执行任务，输出回复文本。session 机制自动维护对话上下文。
 
     Pre-condition:
         start_session() 已成功调用过，或 session 已有上下文
 
     Args:
-        chat_history: 一段或多段聊天记录文本
+        message: 发送给 agent 的消息文本。可以是纯用户消息，
+                 也可以拼入结构化前缀（如前情摘要、发言者标记）。
         agent: agent ID
         session_id: session ID
         timeout: 超时秒数，默认 240
@@ -95,7 +96,7 @@ def call_agent(chat_history, agent=DEFAULT_AGENT,
     Returns:
         dict: {
             "success": bool,
-            "reply": str | None,        # agent 回复文本，成功时有
+            "reply": str | None,        # agent 在 session 中的 AI 回复，成功时有
             "error": str | None,        # 错误描述，失败时有
             "duration_ms": int | None,  # agent 处理耗时
             "usage": dict | None,       # token 用量
@@ -105,7 +106,7 @@ def call_agent(chat_history, agent=DEFAULT_AGENT,
         "openclaw", "agent",
         "--agent", agent,
         "--session-id", session_id,
-        "--message", chat_history,
+        "--message", message,
         "--json",
         "--timeout", str(timeout),
     ]
