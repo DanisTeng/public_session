@@ -185,6 +185,12 @@ def cleanup(c):
     log_path = c.get("log_file", "")
     log(log_path, "🧹  Cleanup: shutting down public session")
 
+    # ── 清理 stop 文件，下次 run 不会立刻停止 ──
+    stop_file = os.path.expanduser(c.get("stop_file", ""))
+    if stop_file and os.path.exists(stop_file):
+        os.remove(stop_file)
+        log(log_path, f"🗑️  Removed stop file: {stop_file}")
+
     # ── TODO: 清理逻辑 ──
     # - 关闭 WS 长连接（若有）
     # - 清理临时文件
