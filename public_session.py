@@ -24,6 +24,11 @@ import time
 from datetime import datetime, timezone, timedelta
 
 from util import config as cfg
+from util.feishu import (
+    get_token,
+    poll_new_messages,
+    react_message,
+)
 
 # ── 常量 ────────────────────────────────────────────────────────────────
 
@@ -96,7 +101,6 @@ def one_tick(c):
     """单次 tick 执行，原子不可中断
 
     空闲态和占用态的逻辑都在此函数内判断。
-    当前为空骨架，业务逻辑后续填充。
 
     Args:
         c: 配置 dict
@@ -110,15 +114,57 @@ def one_tick(c):
     # ── 加载当前状态
     state_dir = os.path.expanduser(c["state_dir"])
     state = _load_state(state_dir)
+    processed_ids = set(state.get("processed_message_ids", []))
 
-    # ── TODO: 双态状态机业务逻辑 ──
-    # 1. 根据 state["state"] 分支：
-    #    空闲态：拉消息 → Get 已读 → 判断是否进入占用态
-    #    占用态：与当前用户对话 → 退出判定
+    # ── 获取 token
+    app_id = os.environ.get(c["env_app_id"])
+    app_secret = os.environ.get(c["env_app_secret"])
+    if not app_id or not app_secret:
+        log(log_path, "❌  Missing APP_ID or APP_SECRET env vars")
+        return time.time() - start
 
-    log(log_path, "🕐  OneTick running (skeleton)")
+    token = get_token(app_id, app_secret)
+    if not token:
+        log(log_path, "❌  Failed to get tenant_access_token")
+        return time.time() - start
+
+    # ── 收集要轮询的会话 ID ──
+    chat_ids = c.get("chat_ids", [])
+    # 兼容旧的单 chat_id 配置
+    old_chat_id = c.get("chat_id", "")
+    if old_chat_id and old_chat_id not in chat_ids:
+        chat_ids.append(old_chat_id)
+
+    if not chat_ids:
+        # 如果没有配置任何 chat_id，尝试列出 bot 所在的群聊
+        from util.feishu import list_chats
+        chats_result = list_chats(token)
+        if chats_result.get("code") == 0:
+            chat_ids = [ch["chat_id"] for ch in chats_result["data"]["items"] if ch.get("chat_id")]
+            log(log_path, f"🔄  Found {len(chat_ids)} chats via list_chats")
+
+    # ── 轮询新消息 ──
+    new_messages = poll_new_messages(chat_ids, token, processed_ids, page_size=50)
+
+    if new_messages:
+        log(log_path, f"📬  Found {len(new_messages)} new message(s)")
+        reacted = 0
+        failed = 0
+        for msg in new_messages:
+            msg_id = msg["message_id"]
+            result = react_message(msg_id, token, emoji="Get")
+            if result.get("code") == 0:
+                reacted += 1
+            else:
+                failed += 1
+                log(log_path, f"⚠️  Failed to react to {msg_id}: {result.get('msg', '')}")
+            processed_ids.add(msg_id)
+        log(log_path, f"📬  Reacted Get: {reacted} ok, {failed} failed")
+    else:
+        log(log_path, "📭  No new messages")
 
     # ── 持久化状态
+    state["processed_message_ids"] = list(processed_ids)
     _save_state(state_dir, state)
 
     elapsed = time.time() - start
