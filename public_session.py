@@ -104,7 +104,7 @@ def _process_new_messages(
         # 逆序遍历 -> 从旧到新
         last_time = lp.get(sender_id, "")
         for msg_id, text, create_time in reversed(msgs):
-            if create_time <= last_time:
+            if create_time < last_time:
                 # 这条消息之前处理过，之后的更旧，跳过
                 break
             # 打 Done
