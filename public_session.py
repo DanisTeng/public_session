@@ -23,8 +23,7 @@ import sys
 import time
 from datetime import datetime, timezone, timedelta
 
-from util import config as cfg
-from util.feishu import get_token
+from config import Config, load as load_config
 
 # ── 常量 ────────────────────────────────────────────────────────────────
 
@@ -49,47 +48,34 @@ def log(log_path, msg):
 
 # ── OneTick ─────────────────────────────────────────────────────────────
 
-def one_tick(c):
+def one_tick(config: Config):
     """单次 tick 执行
 
-    当前为框架骨架：获取 token 后记录日志。
-    后续在此函数中加入 session 发现与对话逻辑。
+    当前为框架骨架，后续在此函数中加入 session 发现与对话逻辑。
 
     Args:
-        c: 配置 dict
+        config: 配置
     """
-    log_path = c.get("log_file", "")
-
-    # ── 获取 token（骨架验证） ──
-    app_id = os.environ.get(c["env_app_id"])
-    app_secret = os.environ.get(c["env_app_secret"])
-    if not app_id or not app_secret:
-        log(log_path, "❌  Missing APP_ID or APP_SECRET env vars")
-        return
-
-    token = get_token(app_id, app_secret)
-    if not token:
-        log(log_path, "❌  Failed to get tenant_access_token")
-        return
+    log_path = config.log_file
 
     log(log_path, "✅  OneTick done")
 
 
 # ── Cleanup ──────────────────────────────────────────────────────────────
 
-def cleanup(c):
+def cleanup(config: Config):
     """进程退出收尾
 
     清理资源、关闭连接、移除 stop 文件。
 
     Args:
-        c: 配置 dict
+        config: 配置
     """
-    log_path = c.get("log_file", "")
+    log_path = config.log_file
     log(log_path, "🧹  Cleanup: shutting down")
 
     # ── 清理 stop 文件，下次 run 不会立刻停止 ──
-    stop_file = os.path.expanduser(c.get("stop_file", ""))
+    stop_file = os.path.expanduser(config.stop_file)
     if stop_file and os.path.exists(stop_file):
         os.remove(stop_file)
         log(log_path, f"🗑️  Removed stop file: {stop_file}")
@@ -99,16 +85,16 @@ def cleanup(c):
 
 # ── 主循环 ──────────────────────────────────────────────────────────────
 
-def run_loop(c):
+def run_loop(config: Config):
     """主循环入口
 
     1 秒固定心跳，检测 stop 文件时执行 cleanup 后退出。
 
     Args:
-        c: 配置 dict
+        config: 配置
     """
-    log_path = c.get("log_file", "")
-    stop_file = os.path.expanduser(c.get("stop_file", ""))
+    log_path = config.log_file
+    stop_file = os.path.expanduser(config.stop_file)
 
     log(log_path, "🚀  Public session started")
 
@@ -121,14 +107,14 @@ def run_loop(c):
             break
 
         # 执行 OneTick
-        one_tick(c)
+        one_tick(config)
 
         # 心跳等待（补足到 1 秒）
         elapsed = time.time() - tick_start
         sleep_sec = max(0, HEARTBEAT_SECONDS - elapsed)
         time.sleep(sleep_sec)
 
-    cleanup(c)
+    cleanup(config)
 
 
 # ── 入口 ────────────────────────────────────────────────────────────────
@@ -138,5 +124,5 @@ if __name__ == "__main__":
         print(f"Usage: {sys.argv[0]} <config.json>", file=sys.stderr)
         sys.exit(1)
 
-    config = cfg.load(sys.argv[1])
+    config = load_config(sys.argv[1])
     run_loop(config)
