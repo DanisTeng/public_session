@@ -1,23 +1,19 @@
 #!/usr/bin/env python3
 """
-public_session.py — 公共会话通道主循环
+public_session.py — 公共会话主循环
 
-常驻 Python 进程，1 秒固定心跳。
-OneTick 为唯一执行接口。
+1 秒固定心跳，OneTick 为唯一执行接口。
 
 用法：public_session.py <config.json>
 
 约定：
-  - config 文件声明 bot 身份、目标用户、会话等信息
-  - 飞书 APP_ID/APP_SECRET 走环境变量（避免写进文件）
+  - 飞书 APP_ID/APP_SECRET 走环境变量，不写进文件
   - 此脚本本身不包含任何用户/会话/环境特化信息
 
 退出机制：
-  - 主循环轮询检查 stop 文件（config 中指定路径）
-  - 文件存在时执行 cleanup 后退出
+  - 主循环每秒检查 stop 文件，存在时 cleanup 后退出
 """
 
-import json
 import os
 import sys
 import time
