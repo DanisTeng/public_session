@@ -88,8 +88,9 @@ def _process_new_messages(
 ):
     """OneTick 核心逻辑：处理所有未标记的 WS 消息。
 
-    遍历 snapshot 中每条消息，如果该 sender 的最后处理时间早于消息的
-    create_time，则打 Done 表情。最后持久化 last_processed 表。
+    用 msg_id 判定处理边界：找到 last_processed 中的 last_msg_id，
+    它之前（离列表头更近，即更新的消息）全部打 Done。
+    最后持久化 last_processed 表。
     """
     log_path = config.log_file
     table = mgr.snapshot()
@@ -101,13 +102,23 @@ def _process_new_messages(
 
     for sender_id, msgs in table.items():
         # msgs: [(message_id, text, create_time), ...], newest first
-        # 逆序遍历 -> 从旧到新
-        last_time = lp.get(sender_id, "")
-        for msg_id, text, create_time in reversed(msgs):
-            if create_time < last_time:
-                # 这条消息之前处理过，之后的更旧，跳过
-                break
-            # 打 Done
+        last_msg_id = lp.get(sender_id, "")
+
+        if not last_msg_id:
+            # 尚无记录，全部标记
+            target_msgs = msgs
+        else:
+            # 找到 last_msg_id 的位置
+            try:
+                idx = next(i for i, (mid, _, _) in enumerate(msgs) if mid == last_msg_id)
+            except StopIteration:
+                # last_msg_id 不在 snapshot 中（可能重启前处理的），全部标记
+                target_msgs = msgs
+            else:
+                # 从 idx 往列表头方向（更新消息）是需要处理的
+                target_msgs = msgs[:idx]
+
+        for msg_id, text, _create_time in target_msgs:
             token = token_provider.get()
             if not token:
                 log(log_path, f"⚠️  Skipping {msg_id[:18]}: no token")
@@ -118,9 +129,9 @@ def _process_new_messages(
             else:
                 log(log_path, f"⚠️  react failed for {msg_id[:18]}: {result.get('msg', 'unknown')}")
 
-        # 更新此 sender 的最后时间（= 最新消息的 create_time）
+        # 更新此 sender 的最后处理消息（= 最新消息的 message_id）
         if msgs:
-            lp[sender_id] = msgs[0][2]  # newest-first, 取第一条
+            lp[sender_id] = msgs[0][0]
 
     if total_processed:
         log(log_path, f"✅  Processed {total_processed} message(s)")
