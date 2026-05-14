@@ -1,24 +1,18 @@
 #!/usr/bin/env python3
 """
-test_message_manager.py — MessageManager 集成测试
+test_message_manager.py — MessageManager integration test.
 
-使用方法：
-  1. 确保 PUBLIC_FEISHU_APP_ID 和 PUBLIC_FEISHU_APP_SECRET 已设置
-  2. 启动测试：python3 test_message_manager.py
-  3. 此时程序会启动 WS 长连接，并向飞书 bot 账号发送消息
-  4. 请给你（james_pm bot）发一条飞书私聊消息
-  5. 程序收到消息后会在终端打印，然后退出
-  6. 按 Ctrl+C 也可手动退出
+Usage:
+  1. Set PUBLIC_FEISHU_APP_ID and PUBLIC_FEISHU_APP_SECRET
+  2. python3 test_message_manager.py
+  3. Send a private chat message to your james_pm bot on Feishu
+  4. Program prints the received message and exits
 
-预期输出：
-  [17:15:00] MessageManager started (WS thread)
-  [17:15:00] WS client created, starting long connection...
-  ...
-  [17:15:05] WS received: [oc_xxx…] ou_xxx: 你的消息内容
-  [17:15:05] Snapshot captured: MessageHistoryTable(1 chats, 1 messages)
-  [17:15:05] Chat IDs: ['oc_xxx']
-  [17:15:05] Messages in chat: ...
-  [17:15:05] Test complete. Exiting.
+Expected output:
+  [12:00:00] MessageManager started
+  [12:00:05] [callback] Got: hello from ou_xxx...
+  [12:00:05] [callback] react result: {...}
+  [12:00:05] Test complete. Exiting.
 """
 
 import logging
@@ -30,7 +24,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from message_manager import MessageManager
 
-# 配置日志
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
@@ -50,50 +43,38 @@ if not APP_ID or not APP_SECRET:
 def main():
     logger.info("🚀  Starting MessageManager test...")
 
-    # 1. 创建并启动 MessageManager
-    mgr = MessageManager(APP_ID, APP_SECRET, mark_get_on_receive=True)
+    received = threading.Event()
+    msg_text = [""]
+
+    def on_msg(msg):
+        logger.info(f"[callback] Got: {msg.text} from {msg.sender_id}")
+        msg_text[0] = msg.text
+
+        # send a reply
+        result = mgr.send_text(msg.sender_id, f"收到: {msg.text}")
+        logger.info(f"[callback] send result: code={result.get('code')}")
+
+        # react with Done
+        result2 = mgr.react(msg.message_id, emoji="Done")
+        logger.info(f"[callback] react result: code={result2.get('code')}")
+
+        received.set()
+
+    import threading
+
+    mgr = MessageManager(APP_ID, APP_SECRET, on_message=on_msg)
     mgr.start()
 
-    # 2. 等待 WS 连接建立 + 等待收到消息
-    logger.info("⏳  Waiting for incoming messages...")
-    logger.info("")
-    logger.info("============================================================")
-    logger.info("  请现在给你的 james_pm bot（PUBLIC bot）发一条飞书私聊消息")
-    logger.info("  收到消息后本程序会在 5 秒内自动退出")
-    logger.info("============================================================")
+    logger.info("⏳  Please send a private message to james_pm bot on Feishu now")
     logger.info("")
 
-    timeout = 90  # 最多等 90 秒
-    start = time.time()
-    captured = False
+    if received.wait(timeout=90):
+        logger.info(f"✅  Received: {msg_text[0]}")
+    else:
+        logger.warning("⚠️  No message received within 90s")
 
-    try:
-        while time.time() - start < timeout:
-            # 3. 每隔 1 秒获取一次快照
-            snap = mgr.snapshot()
-            chat_ids = snap.get_all_chat_ids()
-            if chat_ids:
-                logger.info(f"📸  Snapshot captured: {snap}")
-                logger.info(f"📋  Chat IDs: {chat_ids}")
-                for cid in chat_ids:
-                    msgs = snap.get_chat_messages(cid, limit=5)
-                    logger.info(f"📝  Messages in {cid[:16]}... ({len(msgs)}):")
-                    for m in msgs:
-                        logger.info(f"     [{m.message_id[:16]}…] {m.text[:80]}")
-                captured = True
-                break
-            time.sleep(1)
-
-        if not captured:
-            logger.warning("⚠️  No messages received within 60s timeout")
-        else:
-            logger.info("✅  Test complete. Exiting.")
-
-    except KeyboardInterrupt:
-        logger.info("🛑  Interrupted by user")
-    finally:
-        mgr.stop()
-        logger.info("👋  Done")
+    mgr.stop()
+    logger.info("👋  Done")
 
 
 if __name__ == "__main__":
