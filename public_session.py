@@ -14,12 +14,15 @@ public_session.py — 公共会话主循环
   - 主循环每秒检查 stop 文件，存在时 cleanup 后退出
 """
 
+import json
 import os
 import sys
 import time
 from datetime import datetime, timezone, timedelta
 
-from config import Config, load as load_config
+from config import Config, CachedTokenProvider, load as load_config
+from message_manager import MessageManager, Message
+from util.feishu import react_message
 
 # ── 常量 ────────────────────────────────────────────────────────────────
 
@@ -42,33 +45,117 @@ def log(log_path, msg):
             f.write(line + "\n")
 
 
+# ── Last Processed ─────────────────────────────────────────────────────
+
+_LAST_PROCESSED_PATH: str | None = None
+
+
+def _ensure_last_processed_path(config: Config) -> str:
+    global _LAST_PROCESSED_PATH
+    if _LAST_PROCESSED_PATH is not None:
+        return _LAST_PROCESSED_PATH
+    d = config.state_dir or os.path.dirname(config.log_file or ".")
+    os.makedirs(d, exist_ok=True)
+    _LAST_PROCESSED_PATH = os.path.join(d, "last_processed.json")
+    return _LAST_PROCESSED_PATH
+
+
+def _load_last_processed(config: Config) -> dict[str, str]:
+    """{sender_id: last_create_time}，空 dict 表示无记录"""
+    path = _ensure_last_processed_path(config)
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path) as f:
+            raw = json.load(f)
+        if not isinstance(raw, dict):
+            return {}
+        return {k: str(v) for k, v in raw.items()}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_last_processed(config: Config, lp: dict[str, str]):
+    path = _ensure_last_processed_path(config)
+    with open(path, "w") as f:
+        json.dump(lp, f, indent=2)
+
+
+def _process_new_messages(
+    config: Config,
+    mgr: MessageManager,
+    token_provider: CachedTokenProvider,
+):
+    """OneTick 核心逻辑：处理所有未标记的 WS 消息。
+
+    遍历 snapshot 中每条消息，如果该 sender 的最后处理时间早于消息的
+    create_time，则打 Done 表情。最后持久化 last_processed 表。
+    """
+    log_path = config.log_file
+    table = mgr.snapshot()
+    if not table:
+        return  # 空表，无事可做
+
+    lp = _load_last_processed(config)
+    total_processed = 0
+
+    for sender_id, msgs in table.items():
+        # msgs: [(message_id, text, create_time), ...], newest first
+        # 逆序遍历 -> 从旧到新
+        last_time = lp.get(sender_id, "")
+        for msg_id, text, create_time in reversed(msgs):
+            if create_time <= last_time:
+                # 这条消息之前处理过，之后的更旧，跳过
+                break
+            # 打 Done
+            token = token_provider.get()
+            if not token:
+                log(log_path, f"⚠️  Skipping {msg_id[:18]}: no token")
+                continue
+            result = react_message(msg_id, token, emoji="Done")
+            if result.get("code") == 0:
+                total_processed += 1
+            else:
+                log(log_path, f"⚠️  react failed for {msg_id[:18]}: {result.get('msg', 'unknown')}")
+
+        # 更新此 sender 的最后时间（= 最新消息的 create_time）
+        if msgs:
+            lp[sender_id] = msgs[0][2]  # newest-first, 取第一条
+
+    if total_processed:
+        log(log_path, f"✅  Processed {total_processed} message(s)")
+
+    _save_last_processed(config, lp)
+
+
 # ── OneTick ─────────────────────────────────────────────────────────────
 
-def one_tick(config: Config):
+def one_tick(config: Config, mgr: MessageManager, token_provider: CachedTokenProvider):
     """单次 tick 执行
-
-    当前为框架骨架，后续在此函数中加入 session 发现与对话逻辑。
 
     Args:
         config: 配置
+        mgr: MessageManager 实例
+        token_provider: 缓存 token 提供者
     """
-    log_path = config.log_file
-
-    log(log_path, "✅  OneTick done")
+    _process_new_messages(config, mgr, token_provider)
 
 
 # ── Cleanup ──────────────────────────────────────────────────────────────
 
-def cleanup(config: Config):
+def cleanup(config: Config, mgr: MessageManager):
     """进程退出收尾
 
     清理资源、关闭连接、移除 stop 文件。
 
     Args:
         config: 配置
+        mgr: MessageManager 实例
     """
     log_path = config.log_file
     log(log_path, "🧹  Cleanup: shutting down")
+
+    mgr.stop()
 
     # ── 清理 stop 文件，下次 run 不会立刻停止 ──
     stop_file = os.path.expanduser(config.stop_file)
@@ -92,6 +179,16 @@ def run_loop(config: Config):
     log_path = config.log_file
     stop_file = os.path.expanduser(config.stop_file)
 
+    # 启动 MessageManager（WS 后台线程，不打 Get——由 one_tick 处理）
+    mgr = MessageManager(
+        app_id=config.resolved_app_id,
+        app_secret=config.resolved_app_secret,
+        mark_get_on_receive=False,
+    )
+    mgr.start()
+
+    token_provider = config.new_token_provider()
+
     log(log_path, "🚀  Public session started")
 
     while True:
@@ -103,14 +200,14 @@ def run_loop(config: Config):
             break
 
         # 执行 OneTick
-        one_tick(config)
+        one_tick(config, mgr, token_provider)
 
         # 心跳等待（补足到 1 秒）
         elapsed = time.time() - tick_start
         sleep_sec = max(0, HEARTBEAT_SECONDS - elapsed)
         time.sleep(sleep_sec)
 
-    cleanup(config)
+    cleanup(config, mgr)
 
 
 # ── 入口 ────────────────────────────────────────────────────────────────

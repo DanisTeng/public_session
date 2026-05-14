@@ -88,11 +88,13 @@ class MessageManager:
         app_id: str,
         app_secret: str,
         on_message: Optional[Callable[[Message], None]] = None,
+        mark_get_on_receive: bool = False,
     ):
         self._app_id = app_id
         self._app_secret = app_secret
         self._table = MessageTable()
         self._on_message = on_message
+        self._mark_get_on_receive = mark_get_on_receive
         self._ws_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
 
@@ -183,7 +185,7 @@ class MessageManager:
 
         ws_client = lark.ws.Client(
             self._app_id, self._app_secret,
-            event_handler=handler, log_level=lark.LogLevel.WARN,
+            event_handler=handler, log_level=lark.LogLevel.WARNING,
         )
 
         while not self._stop_event.is_set():
@@ -217,6 +219,13 @@ class MessageManager:
         self._table.add(message_id, sender_id, text, create_time)
 
         # optional callback for event-driven consumers
+        # auto-reply with Get reaction when enabled
+        if self._mark_get_on_receive:
+            try:
+                self.react(message_id, emoji="Get")
+            except Exception as e:
+                logger.error(f"auto Get reaction failed: {e}")
+
         if self._on_message:
             try:
                 self._on_message(msg)

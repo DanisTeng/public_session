@@ -7,25 +7,78 @@
 import json
 import os
 import sys
+import time
 from dataclasses import dataclass
 
+from util.feishu import get_token as _feishu_get_token
+
+
+# ── 缓存 Token ─────────────────────────────────────────────────────────
+
+class CachedTokenProvider:
+    """带缓存的 tenant_access_token 获取器
+
+    缓存 90 分钟（飞书 token 有效期 2 小时），避免每秒请求新 token。
+
+    用法：
+        provider = CachedTokenProvider(app_id, app_secret)
+        token = provider.get()  # 自动缓存/刷新
+    """
+
+    _CACHE_TTL = 5400  # 90 分钟，留 30 分钟余量
+
+    def __init__(self, app_id: str, app_secret: str):
+        self._app_id = app_id
+        self._app_secret = app_secret
+        self._token: str | None = None
+        self._expires_at: float = 0.0
+
+    def get(self) -> str | None:
+        if time.time() < self._expires_at and self._token is not None:
+            return self._token
+        self._token = _feishu_get_token(self._app_id, self._app_secret)
+        if self._token:
+            self._expires_at = time.time() + self._CACHE_TTL
+        return self._token
+
+    def invalidate(self):
+        self._token = None
+        self._expires_at = 0.0
+
+
+# ── 配置 ────────────────────────────────────────────────────────────────
 
 @dataclass
 class Config:
     """public_session 配置
 
     Attributes:
-        env_app_id: 环境变量名，对应飞书 App ID
-        env_app_secret: 环境变量名，对应飞书 App Secret
+        app_id: 飞书 App ID
+        app_secret: 飞书 App Secret
         state_dir: 状态文件目录
         log_file: 日志文件路径（可选），不设则不写文件
         stop_file: stop 文件路径
     """
-    env_app_id: str
-    env_app_secret: str
+    app_id: str = ""
+    app_secret: str = ""
     state_dir: str = ""
     log_file: str = ""
     stop_file: str = ""
+
+    @property
+    def resolved_app_id(self) -> str:
+        if self.app_id:
+            return self.app_id
+        return os.environ.get("PUBLIC_FEISHU_APP_ID", "")
+
+    @property
+    def resolved_app_secret(self) -> str:
+        if self.app_secret:
+            return self.app_secret
+        return os.environ.get("PUBLIC_FEISHU_APP_SECRET", "")
+
+    def new_token_provider(self) -> CachedTokenProvider:
+        return CachedTokenProvider(self.resolved_app_id, self.resolved_app_secret)
 
 
 def load(path) -> Config:
@@ -54,4 +107,5 @@ def load(path) -> Config:
             print(f"ERROR: invalid JSON in {path}: {e}", file=sys.stderr, flush=True)
             sys.exit(2)
 
+    raw = {k: v for k, v in raw.items() if k in Config.__dataclass_fields__}
     return Config(**raw)
