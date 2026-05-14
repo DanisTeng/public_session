@@ -7,7 +7,7 @@
 import json
 import os
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -17,18 +17,12 @@ class Config:
     Attributes:
         env_app_id: 环境变量名，对应飞书 App ID
         env_app_secret: 环境变量名，对应飞书 App Secret
-        target_user_open_id: 目标用户 open_id（可选）
-        chat_id: 会话 ID (oc_xxx)
-        chat_ids: 会话 ID 列表
         state_dir: 状态文件目录
         log_file: 日志文件路径（可选），不设则不写文件
         stop_file: stop 文件路径
     """
     env_app_id: str
     env_app_secret: str
-    target_user_open_id: str = ""
-    chat_id: str = ""
-    chat_ids: list = field(default_factory=list)
     state_dir: str = ""
     log_file: str = ""
     stop_file: str = ""
