@@ -179,11 +179,11 @@ def run_loop(config: Config):
     log_path = config.log_file
     stop_file = os.path.expanduser(config.stop_file)
 
-    # 启动 MessageManager（WS 后台线程，不打 Get——由 one_tick 处理）
+    # 启动 MessageManager（WS 后台线程）
     mgr = MessageManager(
         app_id=config.resolved_app_id,
         app_secret=config.resolved_app_secret,
-        mark_get_on_receive=False,
+        mark_get_on_receive=True,  # 立即打 Get 表示在线
     )
     mgr.start()
 
