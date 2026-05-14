@@ -4,7 +4,7 @@
   "target_user_open_id": "ou_e5be4d011457f53b9cb011cac0ce22f4",
   "chat_id": "oc_be478d78d093f4b06f78c9e3ad921db1",
   "chat_ids": ["oc_be478d78d093f4b06f78c9e3ad921db1"],
-  "state_dir": "~/.openclaw/workspace/memory/public-session",
-  "log_file": "~/.openclaw/workspace/memory/public-session/messages.log",
-  "stop_file": "~/.openclaw/workspace/.public_session.stop"
+  "state_dir": "/james_pm/public_session/state",
+  "log_file": "/james_pm/public_session/state/messages.log",
+  "stop_file": "/james_pm/public_session/state/.public_session.stop"
 }

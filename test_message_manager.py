@@ -51,7 +51,7 @@ def main():
     logger.info("🚀  Starting MessageManager test...")
 
     # 1. 创建并启动 MessageManager
-    mgr = MessageManager(APP_ID, APP_SECRET)
+    mgr = MessageManager(APP_ID, APP_SECRET, mark_get_on_receive=True)
     mgr.start()
 
     # 2. 等待 WS 连接建立 + 等待收到消息
@@ -63,7 +63,7 @@ def main():
     logger.info("============================================================")
     logger.info("")
 
-    timeout = 60  # 最多等 60 秒
+    timeout = 90  # 最多等 90 秒
     start = time.time()
     captured = False
 

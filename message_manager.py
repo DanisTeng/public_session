@@ -25,6 +25,8 @@ import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
+from util.feishu import get_token, send_text_message, _request, react_message
+
 logger = logging.getLogger("message_manager")
 
 HKT = timezone(timedelta(hours=8))
@@ -162,7 +164,7 @@ class MessageManager:
       mgr.stop()
     """
 
-    def __init__(self, app_id: str, app_secret: str):
+    def __init__(self, app_id: str, app_secret: str, mark_get_on_receive: bool = False):
         self._app_id = app_id
         self._app_secret = app_secret
         self._table = MessageHistoryTable()
@@ -170,6 +172,7 @@ class MessageManager:
         self._ws_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._running = False
+        self._mark_get_on_receive = mark_get_on_receive
 
     # ── 启动/停止 ──
 
@@ -229,8 +232,6 @@ class MessageManager:
         Returns:
             dict: 飞书 API 响应
         """
-        from util.feishu import get_token, send_text_message
-
         token = get_token(self._app_id, self._app_secret)
         if not token:
             logger.error("send_text: failed to get token")
@@ -246,8 +247,6 @@ class MessageManager:
             text: 文本内容
         """
         content = json.dumps({"text": text})
-        from util.feishu import _request, get_token
-
         token = get_token(self._app_id, self._app_secret)
         if not token:
             return {"code": -1, "msg": "token failed"}
@@ -292,6 +291,16 @@ class MessageManager:
                 return
 
             msg = Message(event.message.__dict__ if hasattr(event.message, '__dict__') else {})
+
+            # ── 用 WS 事件原始结构覆盖 sender 信息 ──
+            raw_sender = getattr(event.message, 'sender', None)
+            if raw_sender:
+                # lark-oapi SDK 的 Sender 对象
+                sid = str(getattr(raw_sender, 'id', '') or getattr(raw_sender, 'sender_id', '') or '')
+                stype = str(getattr(raw_sender, 'sender_type', '') or 'user')
+                msg.sender_id = sid
+                msg.sender_type = stype
+
             # 补充 event 层的字段
             if hasattr(event.message, 'chat_id') and not msg.chat_id:
                 msg.chat_id = getattr(event.message, 'chat_id', '')
@@ -302,6 +311,22 @@ class MessageManager:
 
             if not msg.message_id:
                 return
+
+            # ── 可选：收到消息时立即打 Get 表情 ──
+            if self._mark_get_on_receive:
+                # 直接用 WS 事件里的 sender 判断
+                raw_sender = getattr(event.message, 'sender', None)
+                sender_type = getattr(raw_sender, 'sender_type', '') if raw_sender else ''
+
+                if sender_type != 'app':
+                    try:
+                        token = get_token(self._app_id, self._app_secret)
+                        if token:
+                            result = react_message(msg.message_id, token, emoji="Get")
+                            if result.get('code') != 0:
+                                logger.warning(f"Get reaction failed: {result}")
+                    except Exception as e:
+                        logger.warning(f"Get reaction exception: {e}")
 
             with self._lock:
                 self._table.add_message(msg)
