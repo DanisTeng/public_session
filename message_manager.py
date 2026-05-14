@@ -1,11 +1,13 @@
-"""message_manager.py - Feishu WS listener with simple message dispatch.
+"""message_manager.py - Feishu WS listener + message snapshot.
 
 Functionality:
-  - WS long connection: receives messages and dispatches via callback
+  - WS long connection: receives messages, stores in internal table
+  - snapshot(): thread-safe deep copy of all messages (for OneTick polling)
+  - on_message callback (optional, for event-driven consumers)
   - REST: send_text(open_id, text), react(message_id, emoji)
-  - No internal message cache. The consumer owns all state.
 """
 
+import copy
 import json
 import logging
 import threading
@@ -17,10 +19,10 @@ from util.feishu import get_token, send_text_message, _request, react_message
 logger = logging.getLogger("message_manager")
 
 
-# ── Tiny data container ───────────────────────────────────────────────
+# ── Message ───────────────────────────────────────────────────────────
 
 class Message:
-    """Minimal Feishu message. Just what the consumer needs."""
+    """Minimal Feishu message."""
 
     __slots__ = ("message_id", "sender_id", "text", "create_time")
 
@@ -34,23 +36,50 @@ class Message:
         return f"Message(id={self.message_id[:18]}, sender={self.sender_id[:12]}, text={self.text[:30]})"
 
 
+# ── MessageTable ──────────────────────────────────────────────────────
+
+class MessageTable:
+    """Thread-safe message store.
+
+    Messages grouped by sender_id (open_id). Each sender gets a list
+    of (message_id, text, create_time) tuples, newest first.
+
+    Consumer reads via deep-copy snapshot. No dedup — WS won't deliver
+    the same message twice.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._by_sender: dict[str, list[tuple[str, str, str]]] = {}
+
+    def add(self, message_id: str, sender_id: str, text: str, create_time: str):
+        with self._lock:
+            if sender_id not in self._by_sender:
+                self._by_sender[sender_id] = []
+            self._by_sender[sender_id].insert(0, (message_id, text, create_time))
+
+    def snapshot(self) -> dict[str, list[tuple[str, str, str]]]:
+        """Deep copy of {sender_id: [(msg_id, text, time), ...]}, newest first."""
+        with self._lock:
+            return copy.deepcopy(self._by_sender)
+
+
 # ── MessageManager ────────────────────────────────────────────────────
 
 class MessageManager:
     """Feishu message manager.
 
-    - Starts a background WS thread that receives messages.
-    - Each incoming message is dispatched to a user-supplied callback.
-    - Provides send_text / react helpers for the consumer to use.
+    - WS background thread receives and stores messages in MessageTable.
+    - snapshot() for OneTick polling (thread-safe deep copy).
+    - on_message callback for event-driven consumers (optional).
+    - send_text / react helpers.
 
     Usage:
-        def on_msg(msg):
-            print(f"Got: {msg.text} from {msg.sender_id}")
-
-        mgr = MessageManager(app_id, app_secret, on_message=on_msg)
+        mgr = MessageManager(app_id, app_secret)
         mgr.start()
-        # ...
-        mgr.send_text("ou_xxx", "hello")
+        ...
+        table = mgr.snapshot()  # OneTick polling
+        send_text("ou_xxx", "hello")
         mgr.stop()
     """
 
@@ -62,6 +91,7 @@ class MessageManager:
     ):
         self._app_id = app_id
         self._app_secret = app_secret
+        self._table = MessageTable()
         self._on_message = on_message
         self._ws_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -84,6 +114,17 @@ class MessageManager:
         if self._ws_thread and self._ws_thread.is_alive():
             self._ws_thread.join(timeout=10)
         logger.info("MessageManager stopped")
+
+    # ── snapshot (thread-safe) ──
+
+    def snapshot(self) -> dict[str, list[tuple[str, str, str]]]:
+        """Thread-safe deep copy of all messages.
+
+        Returns:
+            {sender_id: [(message_id, text, create_time), ...]}
+            Each list is newest-first.
+        """
+        return self._table.snapshot()
 
     # ── REST helpers ──
 
@@ -115,7 +156,6 @@ class MessageManager:
 
     @staticmethod
     def _extract_text(msg_obj) -> str:
-        """Extract plain text from a message object."""
         body = getattr(msg_obj, 'body', None)
         if not body:
             return ""
@@ -171,13 +211,12 @@ class MessageManager:
         text = self._extract_text(msg_obj)
         create_time = getattr(msg_obj, 'create_time', '0')
 
-        msg = Message(
-            message_id=message_id,
-            sender_id=sender_id,
-            text=text,
-            create_time=create_time,
-        )
+        msg = Message(message_id, sender_id, text, create_time)
 
+        # always store in table
+        self._table.add(message_id, sender_id, text, create_time)
+
+        # optional callback for event-driven consumers
         if self._on_message:
             try:
                 self._on_message(msg)
