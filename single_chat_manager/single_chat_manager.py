@@ -235,10 +235,10 @@ class SingleChatManager:
             batch: 按创建时间升序排列的消息列表
         """
         # 日志：收到的所有消息
-        for msg_id, text, _create_time, sender_name, _recv_time in batch:
-            preview = text[:10].replace("\n", " ")
+        for msg in batch:
+            preview = msg.text[:10].replace("\n", " ")
             _log_line(
-                f"💬 {sender_name}: {preview}... [{len(text)}chars]",
+                f"💬 {msg.sender_name}: {preview}... [{len(msg.text)}chars]",
                 c, self._log_file,
             )
 
