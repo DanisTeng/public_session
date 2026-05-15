@@ -127,14 +127,16 @@ class MessageTable:
 
     def add(self, message_id: str, sender_id: str, text: str, create_time: str,
             sender_name: str):
+        recv_time = time.time()  # 本机接收时间，用于 debounce
         with self._lock:
             if sender_id not in self._by_sender:
                 self._by_sender[sender_id] = []
             self._by_sender[sender_id].insert(0,
-                (message_id, text, create_time, sender_name))
+                (message_id, text, create_time, sender_name, recv_time))
 
-    def snapshot(self) -> dict[str, list[tuple[str, str, str, str]]]:
-        """Deep copy of {sender_id: [(msg_id, text, time, name), ...]}, newest first."""
+    def snapshot(self) -> dict[str, list[tuple[str, str, str, str, float]]]:
+        """Deep copy of {sender_id: [(msg_id, text, time, name, recv_time), ...]},
+        newest first."""
         with self._lock:
             return copy.deepcopy(self._by_sender)
 

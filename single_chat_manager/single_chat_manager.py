@@ -52,9 +52,6 @@ class _SessionState:
     """运行时状态"""
     last_msg_id: str            # 已经处理到的消息 id
     last_activity: float        # 上次有消息被处理的时间戳
-    first_seen: dict[str, float] = field(default_factory=dict)
-                                # {msg_id: first_poll_timestamp}
-                                # 记录每条消息第一次被 poll 到的时间
 
 
 # ── 日志 ────────────────────────────────────────────────────────────────
@@ -185,20 +182,18 @@ class SingleChatManager:
     # ── 内部方法 ──
 
     def _poll_new_messages(self, c: Candidate, state: _SessionState, now: float
-                           ) -> list[tuple[str, str, str, str]]:
+                           ) -> list[tuple[str, str, str, str, float]]:
         """获取指定 sender 的所有新消息。
 
         规则：
           1. 从 snapshot 中找到所有比 last_msg_id 更新的消息
-          2. 对每条首次 poll 到但上次还未见过的消息，
-             记录 first_seen 时间戳（当前 poll 时间）
-          3. debounce：这批消息中最后一条（最旧的新消息）被发现的时间
-             距现在不足 _DEBOUNCE_SECONDS，则返回空列表（还在输入中）
-          4. 返回所有已过 debounce 期的消息
+          2. debounce：最新消息的 recv_time 距现在 < 2 秒，
+             认为用户还在输入中，返回空列表
+          3. 返回所有新消息，按创建时间升序排列
 
         Returns:
-            list of (msg_id, text, create_time, sender_name)，
-            按创建时间升序（最早先）。空列表表示无新消息或仍在 debounce。
+            list of (msg_id, text, create_time, sender_name, recv_time)，
+            按创建时间升序。空列表表示无新消息或仍在 debounce。
         """
         table = self._mgr.snapshot()
         msgs = table.get(c.sender_id, [])
@@ -208,7 +203,7 @@ class SingleChatManager:
         # 找出所有比 last_msg_id 更新的消息
         if state.last_msg_id:
             try:
-                idx = next(i for i, (mid, _, _, _) in enumerate(msgs)
+                idx = next(i for i, (mid, _, _, _, _) in enumerate(msgs)
                            if mid == state.last_msg_id)
             except StopIteration:
                 idx = -1  # 断点不在 snapshot 中，全部是新消息
@@ -225,21 +220,15 @@ class SingleChatManager:
         # new_segment 是 newest-first，反转成 oldest-first
         raw = list(reversed(new_segment))
 
-        # 记录首次见到的新消息的 first_seen
-        for msg_id, _, _, _ in raw:
-            if msg_id not in state.first_seen:
-                state.first_seen[msg_id] = now
-
-        # debounce：最早发现的那条新消息（最旧的）是否已过 debounce 期
-        oldest_msg_id = raw[0][0]
-        first_seen_at = state.first_seen[oldest_msg_id]
-        if now - first_seen_at < _DEBOUNCE_SECONDS:
+        # debounce：最新消息的 recv_time 距现在 < 2 秒，认为还在输入中
+        _, _, _, _, newest_recv_time = raw[-1]
+        if now - newest_recv_time < _DEBOUNCE_SECONDS:
             return []
 
         return raw
 
     def _process_batch(self, c: Candidate,
-                       batch: list[tuple[str, str, str, str]],
+                       batch: list[tuple[str, str, str, str, float]],
                        state: _SessionState):
         """处理一批新消息。
 
@@ -247,7 +236,7 @@ class SingleChatManager:
             batch: 按创建时间升序排列的消息列表
         """
         # 日志：收到的所有消息
-        for msg_id, text, _create_time, sender_name in batch:
+        for msg_id, text, _create_time, sender_name, _recv_time in batch:
             preview = text[:10].replace("\n", " ")
             _log_line(
                 f"💬 {sender_name}: {preview}... [{len(text)}chars]",
@@ -290,8 +279,6 @@ class SingleChatManager:
 
         state.last_msg_id = last_msg_id
 
-        # 清理 first_seen（已处理的消息不再需要）
-        for msg_id, _, _, _ in batch:
-            state.first_seen.pop(msg_id, None)
+
 
         self._result.message_count += len(batch)
