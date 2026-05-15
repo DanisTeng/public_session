@@ -203,8 +203,8 @@ class SingleChatManager:
         # 找出所有比 last_msg_id 更新的消息
         if state.last_msg_id:
             try:
-                idx = next(i for i, (mid, _, _, _, _) in enumerate(msgs)
-                           if mid == state.last_msg_id)
+                idx = next(i for i, msg in enumerate(msgs)
+                           if msg.message_id == state.last_msg_id)
             except StopIteration:
                 idx = -1  # 断点不在 snapshot 中，全部是新消息
         else:
