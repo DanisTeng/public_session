@@ -61,7 +61,7 @@ def _ensure_last_processed_path(config: Config) -> str:
 
 
 def _load_last_processed(config: Config) -> dict[str, str]:
-    """{sender_id: last_create_time}，空 dict 表示无记录"""
+    """{sender_id: last_msg_id}，空 dict 表示无记录"""
     path = _ensure_last_processed_path(config)
     if not os.path.exists(path):
         return {}
@@ -101,7 +101,7 @@ def _process_new_messages(
     total_processed = 0
 
     for sender_id, msgs in table.items():
-        # msgs: [(message_id, text, create_time), ...], newest first
+        # msgs: [(message_id, text, create_time, sender_name), ...], newest first
         last_msg_id = lp.get(sender_id, "")
 
         if not last_msg_id:
@@ -110,7 +110,8 @@ def _process_new_messages(
         else:
             # 找到 last_msg_id 的位置
             try:
-                idx = next(i for i, (mid, _, _) in enumerate(msgs) if mid == last_msg_id)
+                idx = next(i for i, (mid, _, _, _) in enumerate(msgs)
+                           if mid == last_msg_id)
             except StopIteration:
                 # last_msg_id 不在 snapshot 中（可能重启前处理的），全部标记
                 target_msgs = msgs
@@ -118,16 +119,18 @@ def _process_new_messages(
                 # 从 idx 往列表头方向（更新消息）是需要处理的
                 target_msgs = msgs[:idx]
 
-        for msg_id, text, _create_time in target_msgs:
+        for msg_id, text, _create_time, sender_name in target_msgs:
             token = token_provider.get()
             if not token:
-                log(log_path, f"⚠️  Skipping {msg_id[:18]}: no token")
+                log(log_path, f"⚠️  Skipping {msg_id[:18]} from {sender_name}: no token")
                 continue
             result = react_message(msg_id, token, emoji="Done")
             if result.get("code") == 0:
                 total_processed += 1
             else:
-                log(log_path, f"⚠️  react failed for {msg_id[:18]}: {result.get('msg', 'unknown')}")
+                log(log_path,
+                    f"⚠️  Done react failed for {sender_name} {msg_id[:18]}: "
+                    f"{result.get('msg', 'unknown')}")
 
         # 更新此 sender 的最后处理消息（= 最新消息的 message_id）
         if msgs:
@@ -195,6 +198,7 @@ def run_loop(config: Config):
         app_id=config.resolved_app_id,
         app_secret=config.resolved_app_secret,
         mark_get_on_receive=True,  # 立即打 Get 表示在线
+        log_file=config.log_file,
     )
     mgr.start()
 
