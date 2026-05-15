@@ -21,6 +21,13 @@ from util.feishu import get_token, send_text_message, _request, react_message
 
 logger = logging.getLogger("message_manager")
 
+# ── 常量 ────────────────────────────────────────────────────────────────
+
+_LOG_ID_TRIM = 18      # 日志中 message_id 截断长度
+_LOG_SENDER_ID_TRIM = 12   # 日志中 sender_id 截断长度
+_LOG_SENDER_ID_FULL = 24   # 日志中 sender_id 完整显示长度
+_LOG_TEXT_TRIM = 30        # 日志中消息文本截断长度
+
 
 # ── NameResolver ────────────────────────────────────────────────────────
 
@@ -84,22 +91,24 @@ class NameResolver:
 # ── Message ───────────────────────────────────────────────────────────
 
 class Message:
-    """Minimal Feishu message."""
+    """Feishu message with metadata."""
 
-    __slots__ = ("message_id", "sender_id", "sender_name", "text", "create_time")
+    __slots__ = ("message_id", "sender_id", "sender_name", "text",
+                 "create_time", "recv_time")
 
     def __init__(self, message_id: str, sender_id: str, sender_name: str,
-                 text: str, create_time: str = "0"):
+                 text: str, create_time: str = "0", recv_time: float = 0.0):
         self.message_id = message_id
         self.sender_id = sender_id
         self.sender_name = sender_name
         self.text = text
         self.create_time = create_time
+        self.recv_time = recv_time
 
     def __repr__(self):
-        return (f"Message(id={self.message_id[:18]}, "
-                f"sender={self.sender_name}({self.sender_id[:12]}), "
-                f"text={self.text[:30]})")
+        return (f"Message(id={self.message_id[:_LOG_ID_TRIM]}, "
+                f"sender={self.sender_name}({self.sender_id[:_LOG_SENDER_ID_TRIM]}), "
+                f"text={self.text[:_LOG_TEXT_TRIM]})")
 
 
 # ── MessageTable ──────────────────────────────────────────────────────
@@ -108,7 +117,7 @@ class MessageTable:
     """Thread-safe message store.
 
     Messages grouped by sender_id (open_id). Each sender gets a list
-    of (message_id, text, create_time, sender_name) tuples, newest first.
+    of Message objects, newest first.
 
     Consumer reads via deep-copy snapshot. No dedup — WS won't deliver
     the same message twice.
@@ -116,18 +125,26 @@ class MessageTable:
 
     def __init__(self):
         self._lock = threading.Lock()
-        self._by_sender: dict[str, list[tuple[str, str, str, str]]] = {}
+        self._by_sender: dict[str, list[Message]] = {}
 
     def add(self, message_id: str, sender_id: str, text: str, create_time: str,
-            sender_name: str):
+            sender_name: str) -> Message:
+        msg = Message(
+            message_id=message_id,
+            sender_id=sender_id,
+            sender_name=sender_name,
+            text=text,
+            create_time=create_time,
+            recv_time=time.time(),  # 本机接收时间，用于 debounce
+        )
         with self._lock:
             if sender_id not in self._by_sender:
                 self._by_sender[sender_id] = []
-            self._by_sender[sender_id].insert(0,
-                (message_id, text, create_time, sender_name))
+            self._by_sender[sender_id].insert(0, msg)
+        return msg
 
-    def snapshot(self) -> dict[str, list[tuple[str, str, str, str]]]:
-        """Deep copy of {sender_id: [(msg_id, text, time, name), ...]}, newest first."""
+    def snapshot(self) -> dict[str, list[Message]]:
+        """Deep copy of {sender_id: [Message, ...]}, newest first."""
         with self._lock:
             return copy.deepcopy(self._by_sender)
 
@@ -209,7 +226,7 @@ class MessageManager:
         """Thread-safe deep copy of all messages.
 
         Returns:
-            {sender_id: [(message_id, text, create_time, sender_name), ...]}
+            {sender_id: [Message, ...]}
             Each list is newest-first.
         """
         return self._table.snapshot()
@@ -303,7 +320,7 @@ class MessageManager:
 
         if not sender_id:
             logger.error(
-                f"Dropping msg {message_id[:18]}: empty sender_id. "
+                f"Dropping msg {message_id[:_LOG_ID_TRIM]}: empty sender_id. "
                 f"event.sender={event_sender!r}"
             )
             return
@@ -314,19 +331,17 @@ class MessageManager:
         sender_name = self._name_resolver.resolve(sender_id)
         if not sender_name:
             logger.error(
-                f"Dropping msg {message_id[:18]}: name resolve failed. "
-                f"sender_id={sender_id[:24]}"
+                f"Dropping msg {message_id[:_LOG_ID_TRIM]}: name resolve failed. "
+                f"sender_id={sender_id[:_LOG_SENDER_ID_FULL]}"
             )
             return
 
-        msg = Message(message_id, sender_id, sender_name, text, create_time)
-
-        self._table.add(message_id, sender_id, text, create_time, sender_name)
+        msg = self._table.add(message_id, sender_id, text, create_time, sender_name)
 
         # ── log incoming message ──
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        preview = text[:10].replace("\n", " ")
-        line = f"[{ts}] 📩 {sender_name}: {preview}... [{len(text)}chars]"
+        preview = msg.text[:10].replace("\n", " ")
+        line = f"[{ts}] 📩 {msg.sender_name}: {preview}... [{len(msg.text)}chars]"
         if self._log_to_stdout:
             print(line, flush=True)
         if self._log_file:

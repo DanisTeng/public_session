@@ -59,15 +59,15 @@ def pick_candidate(
         if not msgs:
             continue
 
-        # msgs 是 newest-first: [(msg_id, text, create_time, sender_name), ...]
+        # msgs 是 newest-first: [Message, ...]
         last_msg_id = last_processed.get(sender_id, "")
 
         if not last_msg_id:
             earliest_msg = msgs[-1]
         else:
             try:
-                idx = next(i for i, (mid, _, _, _) in enumerate(msgs)
-                           if mid == last_msg_id)
+                idx = next(i for i, msg in enumerate(msgs)
+                           if msg.message_id == last_msg_id)
             except StopIteration:
                 earliest_msg = msgs[-1]
             else:
@@ -75,9 +75,8 @@ def pick_candidate(
                     continue  # 没有新消息
                 earliest_msg = msgs[idx - 1]
 
-        _msg_id, _text, create_time_str, sender_name = earliest_msg
         try:
-            earliest_create_time = float(create_time_str)
+            earliest_create_time = float(earliest_msg.create_time)
         except (ValueError, TypeError):
             continue
 
@@ -88,9 +87,9 @@ def pick_candidate(
         if best is None or wait_seconds > best.wait_seconds:
             best = Candidate(
                 sender_id=sender_id,
-                sender_name=sender_name,
+                sender_name=earliest_msg.sender_name,
                 wait_seconds=wait_seconds,
-                first_msg_id=earliest_msg[0],
+                first_msg_id=earliest_msg.message_id,
             )
 
     return best
