@@ -317,6 +317,11 @@ class MessageManager:
 
         self._table.add(message_id, sender_id, text, create_time, sender_name)
 
+        logger.info(
+            f"📩 {sender_name}: {len(text)} chars, "
+            f"msg_id={message_id[:18]}"
+        )
+
         # optional callback for event-driven consumers
         # auto-reply with Get reaction when enabled
         if self._mark_get_on_receive:
