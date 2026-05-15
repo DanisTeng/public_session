@@ -91,17 +91,19 @@ class NameResolver:
 # ── Message ───────────────────────────────────────────────────────────
 
 class Message:
-    """Minimal Feishu message."""
+    """Feishu message with metadata."""
 
-    __slots__ = ("message_id", "sender_id", "sender_name", "text", "create_time")
+    __slots__ = ("message_id", "sender_id", "sender_name", "text",
+                 "create_time", "recv_time")
 
     def __init__(self, message_id: str, sender_id: str, sender_name: str,
-                 text: str, create_time: str = "0"):
+                 text: str, create_time: str = "0", recv_time: float = 0.0):
         self.message_id = message_id
         self.sender_id = sender_id
         self.sender_name = sender_name
         self.text = text
         self.create_time = create_time
+        self.recv_time = recv_time
 
     def __repr__(self):
         return (f"Message(id={self.message_id[:_LOG_ID_TRIM]}, "
@@ -115,7 +117,7 @@ class MessageTable:
     """Thread-safe message store.
 
     Messages grouped by sender_id (open_id). Each sender gets a list
-    of (message_id, text, create_time, sender_name) tuples, newest first.
+    of Message objects, newest first.
 
     Consumer reads via deep-copy snapshot. No dedup — WS won't deliver
     the same message twice.
@@ -123,20 +125,26 @@ class MessageTable:
 
     def __init__(self):
         self._lock = threading.Lock()
-        self._by_sender: dict[str, list[tuple[str, str, str, str]]] = {}
+        self._by_sender: dict[str, list[Message]] = {}
 
     def add(self, message_id: str, sender_id: str, text: str, create_time: str,
-            sender_name: str):
-        recv_time = time.time()  # 本机接收时间，用于 debounce
+            sender_name: str) -> Message:
+        msg = Message(
+            message_id=message_id,
+            sender_id=sender_id,
+            sender_name=sender_name,
+            text=text,
+            create_time=create_time,
+            recv_time=time.time(),  # 本机接收时间，用于 debounce
+        )
         with self._lock:
             if sender_id not in self._by_sender:
                 self._by_sender[sender_id] = []
-            self._by_sender[sender_id].insert(0,
-                (message_id, text, create_time, sender_name, recv_time))
+            self._by_sender[sender_id].insert(0, msg)
+        return msg
 
-    def snapshot(self) -> dict[str, list[tuple[str, str, str, str, float]]]:
-        """Deep copy of {sender_id: [(msg_id, text, time, name, recv_time), ...]},
-        newest first."""
+    def snapshot(self) -> dict[str, list[Message]]:
+        """Deep copy of {sender_id: [Message, ...]}, newest first."""
         with self._lock:
             return copy.deepcopy(self._by_sender)
 
@@ -328,14 +336,12 @@ class MessageManager:
             )
             return
 
-        msg = Message(message_id, sender_id, sender_name, text, create_time)
-
-        self._table.add(message_id, sender_id, text, create_time, sender_name)
+        msg = self._table.add(message_id, sender_id, text, create_time, sender_name)
 
         # ── log incoming message ──
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        preview = text[:10].replace("\n", " ")
-        line = f"[{ts}] 📩 {sender_name}: {preview}... [{len(text)}chars]"
+        preview = msg.text[:10].replace("\n", " ")
+        line = f"[{ts}] 📩 {msg.sender_name}: {preview}... [{len(msg.text)}chars]"
         if self._log_to_stdout:
             print(line, flush=True)
         if self._log_file:

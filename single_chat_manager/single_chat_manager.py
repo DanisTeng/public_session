@@ -22,7 +22,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from config import CachedTokenProvider
-from message_manager import MessageManager
+from message_manager import Message, MessageManager
 from scheduler import Candidate
 
 HKT = timezone(timedelta(hours=8))
@@ -264,8 +264,8 @@ class SingleChatManager:
             )
 
         # 标记最新一条消息 Done
-        last_msg_id = batch[-1][0]
-        done_result = self._mgr.react(last_msg_id, emoji="Done")
+        last_msg = batch[-1]
+        done_result = self._mgr.react(last_msg.message_id, emoji="Done")
         if done_result.get("code") != 0:
             _log_line(
                 f"⚠️  Done 标记失败: {done_result.get('msg', '')}",
@@ -274,11 +274,9 @@ class SingleChatManager:
 
         # 更新 last_processed 到最新消息
         lp = _load_last_processed(self._config)
-        lp[c.sender_id] = last_msg_id
+        lp[c.sender_id] = last_msg.message_id
         _save_last_processed(self._config, lp)
 
-        state.last_msg_id = last_msg_id
-
-
+        state.last_msg_id = last_msg.message_id
 
         self._result.message_count += len(batch)
