@@ -3,6 +3,7 @@
 Functionality:
   - WS long connection: receives messages, stores in internal table
   - snapshot(): thread-safe deep copy of all messages (for OneTick polling)
+  - NameResolver: lazy-cached open_id → name mapping via contact API
   - on_message callback (optional, for event-driven consumers)
   - REST: send_text(open_id, text), react(message_id, emoji)
 """
@@ -19,21 +20,84 @@ from util.feishu import get_token, send_text_message, _request, react_message
 logger = logging.getLogger("message_manager")
 
 
+# ── NameResolver ────────────────────────────────────────────────────────
+
+class NameResolver:
+    """Lazy-cached open_id → name mapping.
+
+    通过飞书 contact API 查询用户名字，结果永久缓存（名字不会频繁变化）。
+    线程安全，支持并发查询。
+    """
+
+    def __init__(self, app_id: str, app_secret: str):
+        self._app_id = app_id
+        self._app_secret = app_secret
+        self._cache: dict[str, str] = {}
+        self._lock = threading.Lock()
+
+    def resolve(self, open_id: str) -> str:
+        """获取 open_id 对应的用户名字。
+
+        优先返回缓存结果。缓存未命中时调用 contact API 查询。
+        API 调用失败时返回 open_id 本身作为 fallback。
+
+        Args:
+            open_id: 飞书用户的 open_id
+
+        Returns:
+            用户名字（中文名），查询失败时返回 open_id
+        """
+        with self._lock:
+            cached = self._cache.get(open_id)
+            if cached is not None:
+                return cached
+
+        # 缓存未命中，调 API
+        token = get_token(self._app_id, self._app_secret)
+        if not token:
+            return open_id
+
+        result = _request(f"/contact/v3/users/{open_id}", token)
+        user = result.get("data", {}).get("user", {})
+        name = user.get("name", "") or ""
+
+        with self._lock:
+            self._cache[open_id] = name if name else open_id
+
+        return name if name else open_id
+
+    def cached_name(self, open_id: str) -> Optional[str]:
+        """仅返回缓存中的名字，不触发 API 调用。
+
+        Args:
+            open_id: 飞书用户的 open_id
+
+        Returns:
+            缓存的名字，或 None（未缓存）
+        """
+        with self._lock:
+            return self._cache.get(open_id)
+
+
 # ── Message ───────────────────────────────────────────────────────────
 
 class Message:
     """Minimal Feishu message."""
 
-    __slots__ = ("message_id", "sender_id", "text", "create_time")
+    __slots__ = ("message_id", "sender_id", "sender_name", "text", "create_time")
 
-    def __init__(self, message_id: str, sender_id: str, text: str, create_time: str = "0"):
+    def __init__(self, message_id: str, sender_id: str, sender_name: str,
+                 text: str, create_time: str = "0"):
         self.message_id = message_id
         self.sender_id = sender_id
+        self.sender_name = sender_name
         self.text = text
         self.create_time = create_time
 
     def __repr__(self):
-        return f"Message(id={self.message_id[:18]}, sender={self.sender_id[:12]}, text={self.text[:30]})"
+        return (f"Message(id={self.message_id[:18]}, "
+                f"sender={self.sender_name}({self.sender_id[:12]}), "
+                f"text={self.text[:30]})")
 
 
 # ── MessageTable ──────────────────────────────────────────────────────
@@ -42,7 +106,7 @@ class MessageTable:
     """Thread-safe message store.
 
     Messages grouped by sender_id (open_id). Each sender gets a list
-    of (message_id, text, create_time) tuples, newest first.
+    of (message_id, text, create_time, sender_name) tuples, newest first.
 
     Consumer reads via deep-copy snapshot. No dedup — WS won't deliver
     the same message twice.
@@ -50,16 +114,18 @@ class MessageTable:
 
     def __init__(self):
         self._lock = threading.Lock()
-        self._by_sender: dict[str, list[tuple[str, str, str]]] = {}
+        self._by_sender: dict[str, list[tuple[str, str, str, str]]] = {}
 
-    def add(self, message_id: str, sender_id: str, text: str, create_time: str):
+    def add(self, message_id: str, sender_id: str, text: str, create_time: str,
+            sender_name: str):
         with self._lock:
             if sender_id not in self._by_sender:
                 self._by_sender[sender_id] = []
-            self._by_sender[sender_id].insert(0, (message_id, text, create_time))
+            self._by_sender[sender_id].insert(0,
+                (message_id, text, create_time, sender_name))
 
-    def snapshot(self) -> dict[str, list[tuple[str, str, str]]]:
-        """Deep copy of {sender_id: [(msg_id, text, time), ...]}, newest first."""
+    def snapshot(self) -> dict[str, list[tuple[str, str, str, str]]]:
+        """Deep copy of {sender_id: [(msg_id, text, time, name), ...]}, newest first."""
         with self._lock:
             return copy.deepcopy(self._by_sender)
 
@@ -71,6 +137,7 @@ class MessageManager:
 
     - WS background thread receives and stores messages in MessageTable.
     - snapshot() for OneTick polling (thread-safe deep copy).
+    - NameResolver built-in: automatically resolves sender names via contact API.
     - on_message callback for event-driven consumers (optional).
     - send_text / react helpers.
 
@@ -93,6 +160,7 @@ class MessageManager:
         self._app_id = app_id
         self._app_secret = app_secret
         self._table = MessageTable()
+        self._name_resolver = NameResolver(app_id, app_secret)
         self._on_message = on_message
         self._mark_get_on_receive = mark_get_on_receive
         self._ws_thread: Optional[threading.Thread] = None
@@ -117,13 +185,22 @@ class MessageManager:
             self._ws_thread.join(timeout=10)
         logger.info("MessageManager stopped")
 
+    # ── name resolver (public) ──
+
+    def resolve_name(self, open_id: str) -> str:
+        """获取 open_id 对应的用户名字。
+
+        委托给内置的 NameResolver，首次调用自动缓存。
+        """
+        return self._name_resolver.resolve(open_id)
+
     # ── snapshot (thread-safe) ──
 
-    def snapshot(self) -> dict[str, list[tuple[str, str, str]]]:
+    def snapshot(self) -> dict[str, list[tuple[str, str, str, str]]]:
         """Thread-safe deep copy of all messages.
 
         Returns:
-            {sender_id: [(message_id, text, create_time), ...]}
+            {sender_id: [(message_id, text, create_time, sender_name), ...]}
             Each list is newest-first.
         """
         return self._table.snapshot()
@@ -208,15 +285,26 @@ class MessageManager:
             return
 
         sender = getattr(msg_obj, 'sender', None)
-        sender_id = str(getattr(sender, 'id', '')) if sender else ''
+        if sender:
+            sender_id_obj = getattr(sender, 'sender_id', None)
+            if sender_id_obj is not None:
+                # sender_id is a UserId object with open_id, union_id, user_id
+                sender_id = getattr(sender_id_obj, 'open_id', '') or ''
+            else:
+                sender_id = ''
+        else:
+            sender_id = ''
 
         text = self._extract_text(msg_obj)
         create_time = getattr(msg_obj, 'create_time', '0')
 
-        msg = Message(message_id, sender_id, text, create_time)
+        # 解析名字（懒缓存）
+        sender_name = self._name_resolver.resolve(sender_id) if sender_id else sender_id
 
-        # always store in table
-        self._table.add(message_id, sender_id, text, create_time)
+        msg = Message(message_id, sender_id, sender_name, text, create_time)
+
+        # always store in table (with name)
+        self._table.add(message_id, sender_id, text, create_time, sender_name)
 
         # optional callback for event-driven consumers
         # auto-reply with Get reaction when enabled
