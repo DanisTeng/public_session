@@ -288,17 +288,20 @@ class MessageManager:
             return
 
         sender = getattr(msg_obj, 'sender', None)
+        sender_id = ''
         if sender:
             sender_id_obj = getattr(sender, 'sender_id', None)
             if sender_id_obj is not None:
                 sender_id = getattr(sender_id_obj, 'open_id', '') or ''
-            else:
-                sender_id = ''
-        else:
-            sender_id = ''
 
-        # sender 未知的消息无法处理，直接丢弃
         if not sender_id:
+            sender_repr = repr(sender) if sender else 'NONE'
+            sid_obj_repr = repr(getattr(sender, 'sender_id', 'N/A')) if sender else 'N/A'
+            logger.error(
+                f"Dropping msg {message_id[:18]}: empty sender. "
+                f"sender={sender_repr}, "
+                f"sender_id_obj={sid_obj_repr}"
+            )
             return
 
         text = self._extract_text(msg_obj)
@@ -306,7 +309,11 @@ class MessageManager:
 
         sender_name = self._name_resolver.resolve(sender_id)
         if not sender_name:
-            # 名字解析失败也应视为 sender 不合法
+            logger.error(
+                f"Dropping msg {message_id[:18]}: name resolve failed. "
+                f"sender_id={sender_id[:24]}, "
+                f"text={text[:50]!r}"
+            )
             return
 
         msg = Message(message_id, sender_id, sender_name, text, create_time)
