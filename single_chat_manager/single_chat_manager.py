@@ -192,8 +192,7 @@ class SingleChatManager:
           3. 返回所有新消息，按创建时间升序排列
 
         Returns:
-            list of (msg_id, text, create_time, sender_name, recv_time)，
-            按创建时间升序。空列表表示无新消息或仍在 debounce。
+            list of Message，按创建时间升序。空列表表示无新消息或仍在 debounce。
         """
         table = self._mgr.snapshot()
         msgs = table.get(c.sender_id, [])

@@ -226,7 +226,7 @@ class MessageManager:
         """Thread-safe deep copy of all messages.
 
         Returns:
-            {sender_id: [(message_id, text, create_time, sender_name), ...]}
+            {sender_id: [Message, ...]}
             Each list is newest-first.
         """
         return self._table.snapshot()
