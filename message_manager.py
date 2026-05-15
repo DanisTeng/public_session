@@ -11,8 +11,10 @@ Functionality:
 import copy
 import json
 import logging
+import os
 import threading
 import time
+from datetime import datetime
 from typing import Callable, Optional
 
 from util.feishu import get_token, send_text_message, _request, react_message
@@ -156,6 +158,7 @@ class MessageManager:
         app_secret: str,
         on_message: Optional[Callable[[Message], None]] = None,
         mark_get_on_receive: bool = False,
+        log_file: str = "",
     ):
         self._app_id = app_id
         self._app_secret = app_secret
@@ -163,6 +166,7 @@ class MessageManager:
         self._name_resolver = NameResolver(app_id, app_secret)
         self._on_message = on_message
         self._mark_get_on_receive = mark_get_on_receive
+        self._log_file = log_file
         self._ws_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
 
@@ -317,10 +321,16 @@ class MessageManager:
 
         self._table.add(message_id, sender_id, text, create_time, sender_name)
 
-        logger.info(
-            f"📩 {sender_name}: {len(text)} chars, "
-            f"msg_id={message_id[:18]}"
-        )
+        # ── log incoming message ──
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = f"[{ts}] 📩 {sender_name}: {len(text)} chars"
+        print(line, flush=True)
+        if self._log_file:
+            od = os.path.dirname(self._log_file)
+            if od:
+                os.makedirs(od, exist_ok=True)
+            with open(self._log_file, "a") as f:
+                f.write(line + "\n")
 
         # optional callback for event-driven consumers
         # auto-reply with Get reaction when enabled
