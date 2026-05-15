@@ -35,36 +35,36 @@ class NameResolver:
         self._cache: dict[str, str] = {}
         self._lock = threading.Lock()
 
-    def resolve(self, open_id: str) -> str:
+    def resolve(self, open_id: str) -> Optional[str]:
         """获取 open_id 对应的用户名字。
 
         优先返回缓存结果。缓存未命中时调用 contact API 查询。
-        API 调用失败时返回 open_id 本身作为 fallback。
+        解析失败（API 不可用、名字不存在）时返回 None。
 
         Args:
             open_id: 飞书用户的 open_id
 
         Returns:
-            用户名字（中文名），查询失败时返回 open_id
+            用户名字（中文名），或 None（解析失败）
         """
         with self._lock:
             cached = self._cache.get(open_id)
             if cached is not None:
-                return cached
+                return cached if cached else None
 
-        # 缓存未命中，调 API
         token = get_token(self._app_id, self._app_secret)
         if not token:
-            return open_id
+            return None
 
         result = _request(f"/contact/v3/users/{open_id}", token)
         user = result.get("data", {}).get("user", {})
         name = user.get("name", "") or ""
 
         with self._lock:
-            self._cache[open_id] = name if name else open_id
+            # 缓存结果：空字符串表示已查询过但无名字
+            self._cache[open_id] = name
 
-        return name if name else open_id
+        return name if name else None
 
     def cached_name(self, open_id: str) -> Optional[str]:
         """仅返回缓存中的名字，不触发 API 调用。
@@ -187,10 +187,13 @@ class MessageManager:
 
     # ── name resolver (public) ──
 
-    def resolve_name(self, open_id: str) -> str:
+    def resolve_name(self, open_id: str) -> Optional[str]:
         """获取 open_id 对应的用户名字。
 
         委托给内置的 NameResolver，首次调用自动缓存。
+
+        Returns:
+            用户名字（中文名），或 None（解析失败）
         """
         return self._name_resolver.resolve(open_id)
 
@@ -288,22 +291,26 @@ class MessageManager:
         if sender:
             sender_id_obj = getattr(sender, 'sender_id', None)
             if sender_id_obj is not None:
-                # sender_id is a UserId object with open_id, union_id, user_id
                 sender_id = getattr(sender_id_obj, 'open_id', '') or ''
             else:
                 sender_id = ''
         else:
             sender_id = ''
 
+        # sender 未知的消息无法处理，直接丢弃
+        if not sender_id:
+            return
+
         text = self._extract_text(msg_obj)
         create_time = getattr(msg_obj, 'create_time', '0')
 
-        # 解析名字（懒缓存）
-        sender_name = self._name_resolver.resolve(sender_id) if sender_id else sender_id
+        sender_name = self._name_resolver.resolve(sender_id)
+        if not sender_name:
+            # 名字解析失败也应视为 sender 不合法
+            return
 
         msg = Message(message_id, sender_id, sender_name, text, create_time)
 
-        # always store in table (with name)
         self._table.add(message_id, sender_id, text, create_time, sender_name)
 
         # optional callback for event-driven consumers
