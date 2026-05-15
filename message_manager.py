@@ -159,6 +159,7 @@ class MessageManager:
         on_message: Optional[Callable[[Message], None]] = None,
         mark_get_on_receive: bool = False,
         log_file: str = "",
+        log_to_stdout: bool = True,
     ):
         self._app_id = app_id
         self._app_secret = app_secret
@@ -167,6 +168,7 @@ class MessageManager:
         self._on_message = on_message
         self._mark_get_on_receive = mark_get_on_receive
         self._log_file = log_file
+        self._log_to_stdout = log_to_stdout
         self._ws_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
 
@@ -242,16 +244,16 @@ class MessageManager:
 
     @staticmethod
     def _extract_text(msg_obj) -> str:
-        body = getattr(msg_obj, 'body', None)
-        if not body:
-            return ""
-        content = getattr(body, 'content', '')
-        if not content:
+        raw = getattr(msg_obj, 'content', '')
+        if not raw:
             return ""
         try:
-            return json.loads(content).get("text", str(content))
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return parsed.get("text", str(parsed))
+            return str(parsed)
         except (json.JSONDecodeError, TypeError):
-            return str(content)
+            return str(raw)
 
     def _ws_loop(self):
         try:
@@ -323,8 +325,10 @@ class MessageManager:
 
         # ── log incoming message ──
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        line = f"[{ts}] 📩 {sender_name}: {len(text)} chars"
-        print(line, flush=True)
+        preview = text[:10].replace("\n", " ")
+        line = f"[{ts}] 📩 {sender_name}: {preview}... [{len(text)}chars]"
+        if self._log_to_stdout:
+            print(line, flush=True)
         if self._log_file:
             od = os.path.dirname(self._log_file)
             if od:
