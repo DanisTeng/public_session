@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-public_session.py — 公共会话主循环
+public_session.py — 公共会话主循环（仓库已转移至 DanisTeng）
 
 1 秒固定心跳，OneTick 为唯一执行接口。
 
