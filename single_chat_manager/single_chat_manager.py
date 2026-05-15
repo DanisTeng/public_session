@@ -221,8 +221,7 @@ class SingleChatManager:
         raw = list(reversed(new_segment))
 
         # debounce：最新消息的 recv_time 距现在 < 2 秒，认为还在输入中
-        _, _, _, _, newest_recv_time = raw[-1]
-        if now - newest_recv_time < _DEBOUNCE_SECONDS:
+        if now - raw[-1].recv_time < _DEBOUNCE_SECONDS:
             return []
 
         return raw
