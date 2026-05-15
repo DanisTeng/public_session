@@ -21,6 +21,13 @@ from util.feishu import get_token, send_text_message, _request, react_message
 
 logger = logging.getLogger("message_manager")
 
+# ── 常量 ────────────────────────────────────────────────────────────────
+
+_LOG_ID_TRIM = 18      # 日志中 message_id 截断长度
+_LOG_SENDER_ID_TRIM = 12   # 日志中 sender_id 截断长度
+_LOG_SENDER_ID_FULL = 24   # 日志中 sender_id 完整显示长度
+_LOG_TEXT_TRIM = 30        # 日志中消息文本截断长度
+
 
 # ── NameResolver ────────────────────────────────────────────────────────
 
@@ -97,9 +104,9 @@ class Message:
         self.create_time = create_time
 
     def __repr__(self):
-        return (f"Message(id={self.message_id[:18]}, "
-                f"sender={self.sender_name}({self.sender_id[:12]}), "
-                f"text={self.text[:30]})")
+        return (f"Message(id={self.message_id[:_LOG_ID_TRIM]}, "
+                f"sender={self.sender_name}({self.sender_id[:_LOG_SENDER_ID_TRIM]}), "
+                f"text={self.text[:_LOG_TEXT_TRIM]})")
 
 
 # ── MessageTable ──────────────────────────────────────────────────────
@@ -303,7 +310,7 @@ class MessageManager:
 
         if not sender_id:
             logger.error(
-                f"Dropping msg {message_id[:18]}: empty sender_id. "
+                f"Dropping msg {message_id[:_LOG_ID_TRIM]}: empty sender_id. "
                 f"event.sender={event_sender!r}"
             )
             return
@@ -314,8 +321,8 @@ class MessageManager:
         sender_name = self._name_resolver.resolve(sender_id)
         if not sender_name:
             logger.error(
-                f"Dropping msg {message_id[:18]}: name resolve failed. "
-                f"sender_id={sender_id[:24]}"
+                f"Dropping msg {message_id[:_LOG_ID_TRIM]}: name resolve failed. "
+                f"sender_id={sender_id[:_LOG_SENDER_ID_FULL]}"
             )
             return
 

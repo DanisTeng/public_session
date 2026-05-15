@@ -11,6 +11,7 @@ MVP 版本（传声筒）：
   - 回复成功后更新 last_processed + 打 Done 标记
   - 30 秒无回复超时结束
   - 每轮对话记入 messages.log
+  - 2 秒 debounce：用户连续发消息时等 ta 停一停再回复
 """
 
 import json
@@ -30,7 +31,8 @@ HKT = timezone(timedelta(hours=8))
 
 _IDLE_TIMEOUT = 30          # 30 秒无回复超时
 _POLL_INTERVAL = 1          # 轮询间隔 1 秒
-_LOG_FILE_EXT = "messages"  # 日志文件名后缀
+_DEBOUNCE_SECONDS = 2       # 发现新消息后等 2 秒再处理
+_LOG_ID_TRIM = 18           # 日志中 message_id 截断长度
 
 
 # ── 数据结构 ────────────────────────────────────────────────────────────
@@ -49,7 +51,10 @@ class ChatResult:
 class _SessionState:
     """运行时状态"""
     last_msg_id: str            # 已经处理到的消息 id
-    last_activity: float        # 上次有消息的时间戳
+    last_activity: float        # 上次有消息被处理的时间戳
+    first_seen: dict[str, float] = field(default_factory=dict)
+                                # {msg_id: first_poll_timestamp}
+                                # 记录每条消息第一次被 poll 到的时间
 
 
 # ── 日志 ────────────────────────────────────────────────────────────────
@@ -104,8 +109,8 @@ class SingleChatManager:
 
     MVP（传声筒版本）：
       - 从 snapshot 中读取指定 sender 的新消息
-      - 对每条新消息：回复"看到了" → 标记 Done → 更新 last_processed
-      - 所有 unprocessed 消息处理完后，等待新消息
+      - 2 秒 debounce：发现消息后等待 2 秒，等用户连续发完再一并处理
+      - 对一批新消息：回复一条"看到了" → 标记 Done → 更新 last_processed
       - 30 秒无新消息 → 超时结束
 
     run() 是唯一公共入口，阻塞执行，返回 ChatResult。
@@ -150,27 +155,24 @@ class SingleChatManager:
             last_activity=time.time(),
         )
 
-        _log_line(f"📞 开始会话 (last={last_msg_id[:18] or 'none'})", c, self._log_file)
+        _log_line(f"📞 开始会话 (last={last_msg_id[:_LOG_ID_TRIM] or 'none'})",
+                  c, self._log_file)
 
-        # 先处理已有的未处理消息
-        self._process_existing(c, state)
-
-        # 进入等待循环
+        # 等待循环：poll → debounce → batch process → 超时退出
         while True:
             now = time.time()
 
-            # 检查是否有新消息
-            new_msg = self._poll_new_message(c, state)
-            if new_msg:
+            new_msgs = self._poll_new_messages(c, state, now)
+            if new_msgs:
                 state.last_activity = now
-                self._process_one_message(c, new_msg[0], new_msg[1],
-                                          new_msg[2], new_msg[3], state)
+                self._process_batch(c, new_msgs, state)
                 continue
 
             # 超时检查
             idle = now - state.last_activity
             if idle >= _IDLE_TIMEOUT:
-                _log_line(f"⏱️  超时（{_IDLE_TIMEOUT}s 无消息）", c, self._log_file)
+                _log_line(f"⏱️  超时（{_IDLE_TIMEOUT}s 无消息）",
+                          c, self._log_file)
                 self._result.timed_out = True
                 break
 
@@ -182,96 +184,114 @@ class SingleChatManager:
 
     # ── 内部方法 ──
 
-    def _process_existing(self, c: Candidate, state: _SessionState):
-        """处理所有处于 unprocessed 状态的消息（即 last_processed 之后的）"""
+    def _poll_new_messages(self, c: Candidate, state: _SessionState, now: float
+                           ) -> list[tuple[str, str, str, str]]:
+        """获取指定 sender 的所有新消息。
+
+        规则：
+          1. 从 snapshot 中找到所有比 last_msg_id 更新的消息
+          2. 对每条首次 poll 到但上次还未见过的消息，
+             记录 first_seen 时间戳（当前 poll 时间）
+          3. debounce：这批消息中最后一条（最旧的新消息）被发现的时间
+             距现在不足 _DEBOUNCE_SECONDS，则返回空列表（还在输入中）
+          4. 返回所有已过 debounce 期的消息
+
+        Returns:
+            list of (msg_id, text, create_time, sender_name)，
+            按创建时间升序（最早先）。空列表表示无新消息或仍在 debounce。
+        """
         table = self._mgr.snapshot()
         msgs = table.get(c.sender_id, [])
         if not msgs:
-            return
+            return []
 
-        # 找到断点
+        # 找出所有比 last_msg_id 更新的消息
         if state.last_msg_id:
             try:
                 idx = next(i for i, (mid, _, _, _) in enumerate(msgs)
                            if mid == state.last_msg_id)
             except StopIteration:
-                idx = -1  # 断点不在 snapshot 中，全部处理
+                idx = -1  # 断点不在 snapshot 中，全部是新消息
         else:
-            idx = -1  # 无断点，全部处理
+            idx = -1
 
         if idx == 0:
-            return  # 已全部处理
+            return []  # 无新消息
 
-        # 从 idx 往列表头方向处理
-        target = msgs[:idx] if idx > 0 else msgs
-        for msg_id, text, create_time, sender_name in reversed(target):
-            self._process_one_message(c, msg_id, text, create_time, sender_name, state)
-            state.last_msg_id = msg_id
+        # 提取所有新消息
+        #   idx > 0: msgs[0..idx-1] 是新消息
+        #   idx < 0: 全部 msgs 都是新消息
+        new_segment = msgs[:idx] if idx > 0 else msgs[:]
+        # new_segment 是 newest-first，反转成 oldest-first
+        raw = list(reversed(new_segment))
 
-    def _poll_new_message(self, c: Candidate, state: _SessionState
-                          ) -> Optional[tuple[str, str, str, str]]:
-        """检查 sender 是否有新消息（比 state.last_msg_id 更新）
+        # 记录首次见到的新消息的 first_seen
+        for msg_id, _, _, _ in raw:
+            if msg_id not in state.first_seen:
+                state.first_seen[msg_id] = now
 
-        Returns:
-            (msg_id, text, create_time, sender_name) 或 None
-        """
-        table = self._mgr.snapshot()
-        msgs = table.get(c.sender_id, [])
-        if not msgs:
-            return None
+        # debounce：最早发现的那条新消息（最旧的）是否已过 debounce 期
+        oldest_msg_id = raw[0][0]
+        first_seen_at = state.first_seen[oldest_msg_id]
+        if now - first_seen_at < _DEBOUNCE_SECONDS:
+            return []
 
-        # msgs 是 newest-first
-        if not state.last_msg_id:
-            return None  # 已经在 _process_existing 处理完了全部
+        return raw
 
-        try:
-            idx = next(i for i, (mid, _, _, _) in enumerate(msgs)
-                       if mid == state.last_msg_id)
-        except StopIteration:
-            return None
-
-        if idx == 0:
-            return None  # 没有更新的消息
-
-        # idx-1 是比 last_msg_id 更新的消息中最旧的那条
-        msg_id, text, create_time, sender_name = msgs[idx - 1]
-        return (msg_id, text, create_time, sender_name)
-
-    def _process_one_message(self, c: Candidate, msg_id: str, text: str,
-                             create_time: str, sender_name: str,
-                             state: Optional[_SessionState] = None):
-        """处理单条消息：回复"看到了" → 标记 Done → 更新 last_processed
+    def _process_batch(self, c: Candidate,
+                       batch: list[tuple[str, str, str, str]],
+                       state: _SessionState):
+        """处理一批新消息。
 
         Args:
-            state: 传入后同步更新运行时 last_msg_id，防止重复处理
+            batch: 按创建时间升序排列的消息列表
         """
-        log_msg = f"💬 {sender_name}: {text[:50]}{'...' if len(text) > 50 else ''}"
-        _log_line(log_msg, c, self._log_file)
+        # 日志：收到的所有消息
+        for msg_id, text, _create_time, sender_name in batch:
+            preview = text[:10].replace("\n", " ")
+            _log_line(
+                f"💬 {sender_name}: {preview}... [{len(text)}chars]",
+                c, self._log_file,
+            )
 
         token = self._token_provider.get()
         if not token:
             _log_line("⚠️  无 token，跳过回复", c, self._log_file)
             return
 
+        # 回复一条"看到了"覆盖整批消息
         reply_text = "看到了"
         reply_result = self._mgr.send_text(c.sender_id, reply_text)
         if reply_result.get("code") != 0:
-            _log_line(f"⚠️  回复 {sender_name} 失败: {reply_result.get('msg', '')}", c, self._log_file)
+            _log_line(
+                f"⚠️  回复 {c.sender_name} 失败: {reply_result.get('msg', '')}",
+                c, self._log_file,
+            )
         else:
             preview = reply_text[:10].replace("\n", " ")
-            _log_line(f"✅  回复 {sender_name}: {preview}... [{len(reply_text)}chars]", c, self._log_file)
+            _log_line(
+                f"✅  回复 {c.sender_name}: {preview}... [{len(reply_text)}chars]",
+                c, self._log_file,
+            )
 
-        # 2. 标记 Done
-        done_result = self._mgr.react(msg_id, emoji="Done")
+        # 标记最新一条消息 Done
+        last_msg_id = batch[-1][0]
+        done_result = self._mgr.react(last_msg_id, emoji="Done")
         if done_result.get("code") != 0:
-            _log_line(f"⚠️  Done 标记失败: {done_result.get('msg', '')}", c, self._log_file)
+            _log_line(
+                f"⚠️  Done 标记失败: {done_result.get('msg', '')}",
+                c, self._log_file,
+            )
 
-        # 3. 更新 last_processed（持久化 + 运行时状态）
+        # 更新 last_processed 到最新消息
         lp = _load_last_processed(self._config)
-        lp[c.sender_id] = msg_id
+        lp[c.sender_id] = last_msg_id
         _save_last_processed(self._config, lp)
 
-        if state is not None:
-            state.last_msg_id = msg_id
+        state.last_msg_id = last_msg_id
 
-        self._result.message_count += 1
+        # 清理 first_seen（已处理的消息不再需要）
+        for msg_id, _, _, _ in batch:
+            state.first_seen.pop(msg_id, None)
+
+        self._result.message_count += len(batch)
