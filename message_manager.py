@@ -287,20 +287,18 @@ class MessageManager:
         if not message_id:
             return
 
-        sender = getattr(msg_obj, 'sender', None)
+        # sender 信息在 event.sender 上，不在 message.sender 里
+        event_sender = getattr(event, 'sender', None)
         sender_id = ''
-        if sender:
-            sender_id_obj = getattr(sender, 'sender_id', None)
+        if event_sender:
+            sender_id_obj = getattr(event_sender, 'sender_id', None)
             if sender_id_obj is not None:
                 sender_id = getattr(sender_id_obj, 'open_id', '') or ''
 
         if not sender_id:
-            sender_repr = repr(sender) if sender else 'NONE'
-            sid_obj_repr = repr(getattr(sender, 'sender_id', 'N/A')) if sender else 'N/A'
             logger.error(
-                f"Dropping msg {message_id[:18]}: empty sender. "
-                f"sender={sender_repr}, "
-                f"sender_id_obj={sid_obj_repr}"
+                f"Dropping msg {message_id[:18]}: empty sender_id. "
+                f"event.sender={event_sender!r}"
             )
             return
 
@@ -311,8 +309,7 @@ class MessageManager:
         if not sender_name:
             logger.error(
                 f"Dropping msg {message_id[:18]}: name resolve failed. "
-                f"sender_id={sender_id[:24]}, "
-                f"text={text[:50]!r}"
+                f"sender_id={sender_id[:24]}"
             )
             return
 
