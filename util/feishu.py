@@ -121,6 +121,26 @@ def react_message(msg_id, token, emoji="Get"):
     )
 
 
+def delete_reaction(msg_id, reaction_id, token):
+    """删除消息上的表情
+
+    reaction_id 可以通过 get_reactions 获取。
+
+    Args:
+        msg_id: 消息 ID
+        reaction_id: reaction 的 ID（从 get_reactions 的结果中获取）
+        token: tenant_access_token
+
+    Returns:
+        dict: 飞书 API 响应
+    """
+    return _request(
+        f"/im/v1/messages/{msg_id}/reactions/{reaction_id}",
+        token=token,
+        method="DELETE",
+    )
+
+
 def get_reactions(msg_id, token, page_size=20):
     """读取消息上的所有表情回复"""
     return _request(

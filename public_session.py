@@ -120,7 +120,7 @@ def run_loop(config: Config):
     mgr = MessageManager(
         app_id=config.resolved_app_id,
         app_secret=config.resolved_app_secret,
-        mark_get_on_receive=True,  # 立即打 Get 表示在线
+        mark_get_on_receive=False,  # typing/done 由 SingleChatManager 管理
         log_file=config.log_file,
     )
     mgr.start()
