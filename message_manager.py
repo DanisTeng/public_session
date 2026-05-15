@@ -17,7 +17,7 @@ import time
 from datetime import datetime
 from typing import Callable, Optional
 
-from util.feishu import get_token, send_text_message, _request, react_message
+from util.feishu import get_token, send_text_message, _request, react_message, delete_reaction, get_reactions
 
 logger = logging.getLogger("message_manager")
 
@@ -256,6 +256,34 @@ class MessageManager:
         if not token:
             return {"code": -1, "msg": "token failed"}
         return react_message(message_id, token, emoji=emoji)
+
+    def mark_typing(self, message_id: str) -> dict:
+        """给消息加 typing indicator（Typing 表情）"""
+        return self.react(message_id, emoji="Typing")
+
+    def mark_done(self, message_id: str) -> dict:
+        """去掉 typing indicator，换成 Done 表情
+
+        先给消息加 Done，然后尝试删除现有的 Typing reaction。
+        删除失败不影响结果（可能没有 Typing reaction 或已被删）。
+        """
+        # 先加 Done
+        result = self.react(message_id, emoji="Done")
+        if result.get("code") != 0:
+            return result
+        # 查询 Typing reaction 的 ID，然后删除它
+        token = get_token(self._app_id, self._app_secret)
+        if not token:
+            return result  # Done 已成功，Typing 删不掉也无所谓
+        reactions = get_reactions(message_id, token)
+        if reactions.get("code") != 0:
+            return result
+        for item in reactions.get("data", {}).get("items", []):
+            rt = item.get("reaction_type", {})
+            if rt.get("emoji_type") == "Typing":
+                delete_reaction(message_id, item.get("reaction_id", ""), token)
+                break
+        return {"code": 0, "msg": "Done marked, Typing cleaned up"}
 
     # ── WS loop ──
 

@@ -30,8 +30,8 @@ HKT = timezone(timedelta(hours=8))
 # ── 常量 ────────────────────────────────────────────────────────────────
 
 _IDLE_TIMEOUT = 30          # 30 秒无回复超时
-_POLL_INTERVAL = 1          # 轮询间隔 1 秒
-_DEBOUNCE_SECONDS = 2       # 发现新消息后等 2 秒再处理
+_POLL_INTERVAL = 0.5        # 轮询间隔 0.5 秒
+_DEBOUNCE_SECONDS = 1       # 发现新消息后等 1 秒再处理
 _LOG_ID_TRIM = 18           # 日志中 message_id 截断长度
 
 
@@ -159,6 +159,12 @@ class SingleChatManager:
         while True:
             now = time.time()
 
+            # 外置 stop 文件检测（如 stop.sh 生成的终止标记）
+            if self._should_stop():
+                _log_line("🛑  Stop file detected, exiting single chat",
+                          c, self._log_file)
+                break
+
             new_msgs = self._poll_new_messages(c, state, now)
             if new_msgs:
                 state.last_activity = now
@@ -180,6 +186,15 @@ class SingleChatManager:
         return self._result
 
     # ── 内部方法 ──
+
+    def _should_stop(self) -> bool:
+        """检查外部终止条件。
+
+        当 public_session 同款的 stop 文件存在时，返回 True。
+        不删除文件，由外层 cleanup 处理。
+        """
+        stop_file = os.path.expanduser(self._config.stop_file)
+        return bool(stop_file and os.path.exists(stop_file))
 
     def _poll_new_messages(self, c: Candidate, state: _SessionState, now: float
                            ) -> list[tuple[str, str, str, str, float]]:
@@ -241,12 +256,22 @@ class SingleChatManager:
                 c, self._log_file,
             )
 
+        # ── 1. 给 batch 中所有消息加 typing indicator（Get 表情）──
+        for msg in batch:
+            tr = self._mgr.mark_typing(msg.message_id)
+            if tr.get("code") != 0:
+                _log_line(
+                    f"⚠️  typing 标记失败 ({msg.message_id[:_LOG_ID_TRIM]}): "
+                    f"{tr.get('msg', '')}",
+                    c, self._log_file,
+                )
+
         token = self._token_provider.get()
         if not token:
             _log_line("⚠️  无 token，跳过回复", c, self._log_file)
             return
 
-        # 回复一条"看到了"覆盖整批消息
+        # ── 2. 实际处理（MVP：回复一条"看到了"）──
         reply_text = "看到了"
         reply_result = self._mgr.send_text(c.sender_id, reply_text)
         if reply_result.get("code") != 0:
@@ -261,16 +286,18 @@ class SingleChatManager:
                 c, self._log_file,
             )
 
-        # 标记最新一条消息 Done
-        last_msg = batch[-1]
-        done_result = self._mgr.react(last_msg.message_id, emoji="Done")
-        if done_result.get("code") != 0:
-            _log_line(
-                f"⚠️  Done 标记失败: {done_result.get('msg', '')}",
-                c, self._log_file,
-            )
+        # ── 3. batch 处理完成，把所有 typing indicator 换成 Done ──
+        for msg in batch:
+            dr = self._mgr.mark_done(msg.message_id)
+            if dr.get("code") != 0:
+                _log_line(
+                    f"⚠️  Done 标记失败 ({msg.message_id[:_LOG_ID_TRIM]}): "
+                    f"{dr.get('msg', '')}",
+                    c, self._log_file,
+                )
 
         # 更新 last_processed 到最新消息
+        last_msg = batch[-1]
         lp = _load_last_processed(self._config)
         lp[c.sender_id] = last_msg.message_id
         _save_last_processed(self._config, lp)
