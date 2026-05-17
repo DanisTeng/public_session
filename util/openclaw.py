@@ -12,6 +12,7 @@
 
 import json
 import subprocess
+import uuid
 from dataclasses import dataclass
 from typing import Optional
 
@@ -33,6 +34,30 @@ class AgentResult:
 
 
 # ── 核心函数 ──────────────────────────────────────────────────────────
+
+
+def run_temp_session(task: str, timeout: int = 60) -> Optional[str]:
+    """开一个临时 OpenClaw session，执行一次性任务，返回输出文本。
+
+    Args:
+        task: 要执行的任务文本（如判断、搜索、摘要等）
+        timeout: 超时秒数，默认 60s（轻量任务较短）
+
+    Returns:
+        str: agent 的完整回复文本，失败或超时返回 None。
+
+    特性：
+      - 每次调用使用随机 session ID，不累积上下文
+      - session 用完即弃，不残留脏状态
+      - session ID 使用 uuid 生成，不与其他调用冲突
+      - 不会自动存入 memory（--json 模式不触发 memory hook）
+    """
+    session_id = f"temp-session-{uuid.uuid4().hex[:12]}"
+    result = _call_agent(task, session_id, timeout)
+    if result is None:
+        return None
+    return result.full_text if result.full_text else None
+
 
 def generate_reply(
     user_message: str,
