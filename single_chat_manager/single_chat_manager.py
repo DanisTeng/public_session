@@ -156,13 +156,6 @@ class SingleChatManager:
         _log_line(f"📞 开始会话 (last={last_msg_id[:_LOG_ID_TRIM] or 'none'})",
                   c, self._log_file)
 
-        # ── 前情提要：通过 temp session 搜索记忆上下文 ──
-        context_prefix = self._build_context_prefix(c)
-        self._context_prefix = context_prefix or ""
-        if context_prefix:
-            _log_line(f"📖 前情提要已加载 ({len(context_prefix)} chars)",
-                      c, self._log_file)
-
         # 等待循环：poll → debounce → batch process → 超时退出
         while True:
             now = time.time()
@@ -364,7 +357,7 @@ class SingleChatManager:
                 c, self._log_file,
             )
 
-        # ── 1. 给 batch 中所有消息加 typing indicator（Get 表情）──
+        # ── 1. 给 batch 中所有消息加 typing indicator（Typing 表情）──
         for msg in batch:
             tr = self._mgr.mark_typing(msg.message_id)
             if tr.get("code") != 0:
@@ -374,7 +367,16 @@ class SingleChatManager:
                     c, self._log_file,
                 )
 
-        # ── 2. 将 batch 合并后交给 OpenClaw 生成回复 ──
+        # ── 2. 前情提要（有记忆的话第一次 batch 才会触发）──
+        ctx = getattr(self, '_context_prefix', '')
+        if not ctx:
+            prefix = self._build_context_prefix(c)
+            self._context_prefix = prefix or ""
+            if prefix:
+                _log_line(f"📖 前情提要已加载 ({len(prefix)} chars)",
+                          c, self._log_file)
+
+        # ── 3. 将 batch 合并后交给 OpenClaw 生成回复 ──
         session_id = f"{_SESSION_ID_PREFIX}{c.sender_id}"
 
         # 拼接用户消息
@@ -387,7 +389,6 @@ class SingleChatManager:
             user_text = "\n".join(lines)
 
         # 如果有前情提要，拼接为 system-style 上下文前缀
-        # 注意：`_context_prefix` 在 run() 中通过 _build_context_prefix 设置
         ctx = getattr(self, '_context_prefix', '')
         if ctx:
             prompt = (
