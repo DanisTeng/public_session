@@ -32,6 +32,8 @@ _POLL_INTERVAL = 0.5        # 轮询间隔 0.5 秒
 _DEBOUNCE_SECONDS = 1       # 发现新消息后等 1 秒再处理
 _LOG_ID_TRIM = 18           # 日志中 message_id 截断长度
 _SESSION_ID_PREFIX = "public-session-"  # OpenClaw session ID 前缀，per sender
+_PPPC_TIMEOUT = 60          # PPPC 摘要生成超时（秒）
+_DIARY_TIMEOUT = 15         # /new 原生日记超时（秒）
 _MEMORY_CONTEXT_TIMEOUT = 30  # memory_search/写记忆的超时（秒）
 
 HKT = timezone(timedelta(hours=8))
@@ -126,11 +128,13 @@ class SingleChatManager:
         self._token_provider = token_provider
         self._candidate = candidate
         self._log_file = config.log_file or ""
+        self._workspace_root = config.workspace_root or os.path.dirname(config.log_file or ".")
 
         self._result = ChatResult(
             sender_id=candidate.sender_id,
             sender_name=candidate.sender_name,
         )
+        self._session_id = ""  # init 后由 run() 设置
 
     # ── 公共入口 ──
 
@@ -143,6 +147,7 @@ class SingleChatManager:
             ChatResult: 本次会话的结果
         """
         c = self._candidate
+        self._session_id = f"{_SESSION_ID_PREFIX}{c.sender_id}"
 
         # 初始化状态：从 last_processed 拿到此 sender 的处理断点
         lp = _load_last_processed(self._config)
@@ -182,8 +187,8 @@ class SingleChatManager:
 
             time.sleep(_POLL_INTERVAL)
 
-        # ── 会话结束：主 session 总结，temp session 写记忆文件 ──
-        self._finalize_chat(c)
+        # ── 会话结束：主 session 生成 PPPC 摘要 + /new 原生日记 ──
+        self._finalize(c)
 
         _log_line(f"✅ 会话结束，共处理 {self._result.message_count} 条消息",
                   c, self._log_file)
@@ -215,76 +220,112 @@ class SingleChatManager:
             return ""
         return result.strip()
 
+    # ── PPPC 辅助（纯函数）──
+
+    @staticmethod
+    def _build_pppc_summary_prompt(name: str, open_id: str,
+                                    message_count: int,
+                                    timed_out: bool) -> str:
+        """构建 finalize 阶段生成 PPPC 摘要的 prompt。"""
+        return (
+            f"## 指令\n"
+            f"请为本次 public session 对话生成一个简洁的摘要（PPPC — "
+            f"Per-Person Public Context），用于下次对话时加载为前情提要。\n"
+            f"\n"
+            f"## 对话信息\n"
+            f"- 参与者: {name} ({open_id})\n"
+            f"- 处理消息数: {message_count}\n"
+            f"- 是否超时: {'是' if timed_out else '否'}\n"
+            f"\n"
+            f"## 输出格式\n"
+            f"请只输出以下格式的摘要，不要包含其他任何内容：\n"
+            f"\n"
+            f"[PPPC_START]\n"
+            f"- 日期: {{对话日期}}\n"
+            f"- 主题: {{一句话概括本次对话主题}}\n"
+            f"- 摘要: {{2-5句话描述对话内容、关键决策、重要信息}}\n"
+            f"[/PPPC_END]\n"
+            f"\n"
+            f"如果本次对话没有实质内容（如只有打招呼），只输出 [PPPC_START][/PPPC_END]。"
+        )
+
+    def _get_pppc_dir(self, open_id: str) -> str:
+        """返回某个 sender 的 PPPC 文件目录。"""
+        return os.path.join(
+            self._workspace_root, "memory", "public-session", open_id)
+
+    def _write_pppc(self, open_id: str, content: str) -> Optional[str]:
+        """将 PPPC 摘要写入文件。"""
+        start_tag = "[PPPC_START]"
+        end_tag = "[/PPPC_END]"
+        start_idx = content.find(start_tag)
+        end_idx = content.find(end_tag)
+
+        if start_idx < 0 or end_idx < 0:
+            return None
+
+        pure = content[start_idx + len(start_tag):end_idx].strip()
+        if not pure:
+            return None
+
+        date_str = datetime.now(HKT).strftime("%Y-%m-%d")
+        pppc_dir = self._get_pppc_dir(open_id)
+        os.makedirs(pppc_dir, exist_ok=True)
+        path = os.path.join(pppc_dir, f"{date_str}.md")
+
+        try:
+            with open(path, "w") as f:
+                f.write(pure + "\n")
+            return path
+        except OSError:
+            return None
+
     # ── 会话结束收尾 ──
 
-    def _finalize_chat(self, c: Candidate):
-        """会话结束时的收尾工作：主 session 总结，temp session 存文件。
+    def _finalize(self, c: Candidate):
+        """会话结束收尾：主 session 生成 PPPC 摘要 + /new 触发原生日记。
 
-        策略：
-          1. 通过 temp session 让 agent 判断是否需要写记忆
-          2. 根据判断结果，决定是否写 memory 文件
-          3. 只对 message_count > 0 的会话做收尾
+        流程：
+          1. message_count == 0 → 直接返回
+          2. 主 session 生成 PPPC 摘要（generate_reply，不发飞书）
+          3. Python 解析写入 PPPC 文件
+          4. 主 session 发 /new 触发 OpenClaw 原生日记 hook
         """
         if self._result.message_count <= 0:
             return
 
         name = c.sender_name or c.sender_id
-        date_str = datetime.now(HKT).strftime("%Y-%m-%d")
-
-        # 让 agent 阅读主 session 的最近部分，输出记忆摘要
-        # 我们通过 temp session 来做这个判断和写入
-        memory_dir = os.path.join(
-            os.path.dirname(self._log_file) if self._log_file else ".",
-            "memory", "public-session", c.sender_id,
+        prompt = self._build_pppc_summary_prompt(
+            name, c.sender_id,
+            self._result.message_count,
+            self._result.timed_out,
         )
-        memory_path = os.path.join(memory_dir, f"{date_str}.md")
 
-        # 已有记忆文件的话先读取
-        existing = ""
-        if os.path.exists(memory_path):
-            try:
-                with open(memory_path) as f:
-                    existing = f.read()[:500]
-            except OSError:
-                pass
-
-        task = (
-            f"你是一个 public session 的记忆管理助手。你的任务是处理 chat finalize。\n"
-            f"\n"
-            f"[对话参与者] {name} ({c.sender_id})\n"
-            f"[日期] {date_str}\n"
-            f"[本次处理消息数] {self._result.message_count}\n"
-            f"[是否超时] {'是' if self._result.timed_out else '否'}\n"
-            f"\n"
+        _log_line(f"📝 Finalize: 生成 PPPC 摘要...", c, self._log_file)
+        pppc_raw = generate_reply(
+            prompt,
+            session_id=self._session_id,
+            timeout=_PPPC_TIMEOUT,
         )
-        if existing:
-            task += (
-                f"[已有今日记忆文件内容]\n"
-                f"{existing}\n\n"
-                f"请在下方输出更新后的完整文件内容。\n"
-                f"如果本次对话没有新的值得记录的信息，回复 'NO_UPDATE' 不写。\n"
-            )
+
+        if pppc_raw:
+            path = self._write_pppc(c.sender_id, pppc_raw)
+            if path:
+                _log_line(f"📝 PPPC 已写入 {path}", c, self._log_file)
+            else:
+                _log_line(f"⚠️  PPPC 解析失败（未找到标签）", c, self._log_file)
+                _log_line(f"    agent 回复: {pppc_raw[:200]}", c, self._log_file)
         else:
-            task += (
-                f"[备注] 这是 {name} 今日第一条记忆记录。\n"
-                f"本次对话中对方没有发送实质消息，回复 'NO_UPDATE'\n"
-                f"否则请在下方输出要写入的 markdown 内容。\n"
-            )
+            _log_line(f"⚠️  PPPC 生成失败（agent 无回复）", c, self._log_file)
 
-        # 先用 temp session 判断/生成摘要
-        summary = run_temp_session(task, timeout=_MEMORY_CONTEXT_TIMEOUT)
-        if not summary or summary.strip() == "NO_UPDATE":
-            _log_line("📝 Finalize: 无需写记忆", c, self._log_file)
-            return
-
-        # 写入文件
-        os.makedirs(memory_dir, exist_ok=True)
-        try:
-            with open(memory_path, "w") as f:
-                f.write(summary.strip() + "\n")
-            _log_line(f"📝 记忆已写入 {memory_path}", c, self._log_file)
-        except OSError as e:
-            _log_line(f"⚠️  写记忆文件失败: {e}", c, self._log_file)
+        # 发 /new 触发原生日记保存
+        _log_line(f"📝 触发原生日记保存 (/new)...", c, self._log_file)
+        generate_reply(
+            "/new",
+            session_id=self._session_id,
+            timeout=_DIARY_TIMEOUT,
+        )
+        _log_line(f"✅ 原生日记保存已触发", c, self._log_file)
 
     # ── Stop 检测 ──
 
