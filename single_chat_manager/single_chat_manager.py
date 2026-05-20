@@ -128,7 +128,13 @@ class SingleChatManager:
         self._token_provider = token_provider
         self._candidate = candidate
         self._log_file = config.log_file or ""
-        self._workspace_root = config.workspace_root or os.path.dirname(config.log_file or ".")
+        # workspace_root = state_dir/..（约定 state 在 workspace 根下）
+        if config.state_dir:
+            self._workspace_root = os.path.dirname(os.path.normpath(config.state_dir))
+        elif config.log_file:
+            self._workspace_root = os.path.dirname(os.path.dirname(os.path.normpath(config.log_file)))
+        else:
+            self._workspace_root = "/james_pm/public_session"
 
         self._result = ChatResult(
             sender_id=candidate.sender_id,
