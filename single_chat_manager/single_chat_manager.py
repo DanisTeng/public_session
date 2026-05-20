@@ -264,25 +264,31 @@ class SingleChatManager:
     # ── 前情提要 ──
 
     def _build_context_prefix(self, c: Candidate) -> str:
-        """读取 PPPC 文件中的原始对话记录作为前情提要。
+        """构建 init 阶段的前情提要。
 
-        PPPC 文件存放最近 ~1000 chars 的原始对话记录（非摘要）。
-        直接加载后以原始对话格式拼接到 prompt 中，让 agent 感觉
-        对话没有中断过。
-
-        Returns:
-            原始对话文本，无文件时返回空字符串。
+        包含三部分：
+          1. 对话对象身份说明
+          2. 提示使用 memory_search 搜索原生日记
+          3. PPPC 中的原始对话记录
         """
-        raw = _read_pppc_files(self._workspace_root, c.sender_id)
-        if not raw:
-            return ""
+        name = c.sender_name or c.sender_id
 
-        # 以原始对话格式包裹
-        return (
-            f"[之前的对话记录]\n"
-            f"{raw.strip()}\n"
-            f"[/之前的对话记录]"
-        )
+        parts = [
+            f"你正在与 {name} 对话，请用 {name} 称呼对方。",
+            "",
+            "你可以使用 memory_search 搜索近期的原生日记作为补充背景信息。",
+        ]
+
+        raw = _read_pppc_files(self._workspace_root, c.sender_id)
+        if raw:
+            parts.extend([
+                "",
+                f"[之前的对话记录]",
+                raw.strip(),
+                f"[/之前的对话记录]",
+            ])
+
+        return "\n".join(parts)
 
     # ── PPPC 辅助（纯函数）──
 
