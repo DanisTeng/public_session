@@ -319,6 +319,39 @@ class SingleChatManager:
         return os.path.join(
             self._workspace_root, "memory", "public-session", open_id)
 
+    def _build_diary_entry(self, c: Candidate) -> str:
+        """生成一条原生日记条目。
+
+        OpenClaw memory promote 读取 memory/YYYY-MM-DD.md 中的记录
+        作为短期记忆候选，格式参考 OpenClaw 自动生成的原生日记。
+        """
+        name = c.sender_name or c.sender_id
+        msg_count = self._result.message_count
+        timed_out = self._result.timed_out
+
+        lines = [f"## Public Session - {name}"]
+        lines.append("")
+        lines.append(
+            f"{name} 与 public session 进行了对话")
+        if timed_out:
+            lines.append("（会话因超时结束）")
+        lines.append("")
+
+        # 抽取对话摘要（取 processed_msgs 中最后几轮的原始文字）
+        if self._result.processed_msgs:
+            lines.append("### 对话内容")
+            lines.append("")
+            # 最多显示最近 5 轮
+            tail = self._result.processed_msgs[-5:]
+            for speaker, text, reply in tail:
+                preview = text[:100].replace("\n", " ")
+                lines.append(f"- {speaker}: {preview}")
+            lines.append("")
+            lines.append(
+                f"本次会话共处理 {msg_count} 条消息。")
+
+        return "\n".join(lines)
+
     def _write_pppc_raw(self, open_id: str, content: str) -> Optional[str]:
         """将原始对话文本写入 PPPC 文件（按对话时间命名）。"""
         ts = datetime.now(HKT).strftime("%Y-%m-%d_%H%M%S")
@@ -360,23 +393,31 @@ class SingleChatManager:
         else:
             _log_line(f"⚠️  PPPC 写入失败", c, self._log_file)
 
-        # 触发 OpenClaw 记忆归档
-        _log_line(f"📝 触发记忆归档 (openclaw memory promote --apply)...",
-                  c, self._log_file)
-        try:
-            result = subprocess.run(
-                ["openclaw", "memory", "promote", "--apply"],
-                capture_output=True, text=True, timeout=_PROMOTE_TIMEOUT,
-            )
-            if result.returncode == 0:
-                _log_line(f"✅ 记忆归档完成", c, self._log_file)
-            else:
-                _log_line(f"⚠️  记忆归档返回非零: {result.returncode}",
-                          c, self._log_file)
-        except subprocess.TimeoutExpired:
-            _log_line(f"⚠️  记忆归档超时", c, self._log_file)
-        except FileNotFoundError:
-            _log_line(f"⚠️  openclaw 命令未找到", c, self._log_file)
+        # 写一条原生日记到 ~/.openclaw/workspace/memory/YYYY-MM-DD.md
+        # OpenClaw memory promote 从 memory/*.md 中读取短期候选
+        diary_entry = self._build_diary_entry(c)
+        if diary_entry:
+            diary_dir = os.path.expanduser("~/.openclaw/workspace/memory")
+            date_str = datetime.now(HKT).strftime("%Y-%m-%d")
+            os.makedirs(diary_dir, exist_ok=True)
+            diary_file = os.path.join(diary_dir, f"{date_str}.md")
+            try:
+                with open(diary_file, "a") as f:
+                    f.write("\n" + diary_entry + "\n")
+                _log_line(f"📝 原生日记已写入 {diary_file}", c, self._log_file)
+                
+                # 触发 promote 让记忆进入长期
+                result = subprocess.run(
+                    ["openclaw", "memory", "promote", "--apply"],
+                    capture_output=True, text=True, timeout=_PROMOTE_TIMEOUT,
+                )
+                if result.returncode == 0:
+                    _log_line(f"✅ 记忆 promote 完成", c, self._log_file)
+                else:
+                    _log_line(f"⚠️  promote 返回非零: {result.returncode}",
+                              c, self._log_file)
+            except OSError as e:
+                _log_line(f"⚠️  写原生日记失败: {e}", c, self._log_file)
 
     # ── Stop 检测 ──
 
