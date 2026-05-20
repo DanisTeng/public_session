@@ -22,6 +22,7 @@ single_chat_manager v2 — 重写会话管理器
     result = mgr.run(candidate)
 """
 
+import json
 import os
 import time
 from dataclasses import dataclass
@@ -348,6 +349,12 @@ class SingleChatManagerV2:
 
             time.sleep(_POLL_INTERVAL)
 
+        # ── 同步 last_processed：让调度器知道我们已经处理到哪 ──
+        if last_msg_id is not None:
+            _sync_last_processed(self._config, c.sender_id, last_msg_id)
+            _log_line(f"📝 已持久化 last_processed: {last_msg_id[:_LOG_ID_TRIM]}...",
+                      c, self._log_file)
+
         # ── Finalize: PPPC 摘要 + 原生日记 ──
         self._finalize(c)
 
@@ -529,3 +536,37 @@ class SingleChatManagerV2:
         if self._stop_file and os.path.exists(self._stop_file):
             return True
         return False
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# last_processed 持久化
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _ensure_last_processed_path(config) -> str:
+    """获取 last_processed.json 路径，创建目录。"""
+    d = config.state_dir or os.path.dirname(config.log_file or ".")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "last_processed.json")
+
+
+def _sync_last_processed(config, sender_id: str, msg_id: str):
+    """将 sender 的处理进度持久化到 last_processed.json。
+
+    供 run() 结束时调用，确保调度器下次不会重复选中同一个 sender。
+    """
+    path = _ensure_last_processed_path(config)
+    try:
+        with open(path) as f:
+            lp = json.load(f)
+        if not isinstance(lp, dict):
+            lp = {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        lp = {}
+
+    lp[sender_id] = msg_id
+    try:
+        with open(path, "w") as f:
+            json.dump(lp, f, indent=2)
+    except OSError:
+        pass
