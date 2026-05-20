@@ -22,7 +22,6 @@ single_chat_manager v2 — 重写会话管理器
     result = mgr.run(candidate)
 """
 
-import json
 import os
 import time
 from dataclasses import dataclass
@@ -30,7 +29,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from config import CachedTokenProvider
-from message_manager import Message, MessageManager
+from message_manager import MessageManager
 from scheduler import Candidate
 from util.openclaw import generate_reply
 
@@ -42,6 +41,9 @@ _IDLE_TIMEOUT = 120         # 无新消息超时（秒）
 _LOG_ID_TRIM = 18           # 日志中 message_id 截断长度
 _SESSION_ID_PREFIX = "public-session-"  # OpenClaw session ID 前缀，per sender
 _PPPC_RECENT_DAYS = 7       # 读取最近几天的 PPPC 文件
+_AGENT_TIMEOUT = 180        # generate_reply 超时（秒）
+_PPPC_TIMEOUT = 60          # PPPC 摘要生成超时（秒）
+_DIARY_TIMEOUT = 15         # /new 原生日记超时（秒）
 
 HKT = timezone(timedelta(hours=8))
 
@@ -303,9 +305,7 @@ class SingleChatManagerV2:
         _log_line(f"[chat {name}] 📞 开始会话 (v2, pp={len(pppc)}chars)",
                   c, self._log_file)
 
-        # 给飞书用户发第一条消息
-        self._mgr.send_text(c.sender_id,
-                            "你好，我是 public session bot！有什么可以帮你？")
+        # v2 不发送打招呼消息
 
         last_activity = time.time()
         last_msg_id: Optional[str] = None
@@ -321,6 +321,10 @@ class SingleChatManagerV2:
             if new_msgs:
                 # debounce：等用户连续输入
                 self._wait_debounce(c, last_msg_id)
+
+                # debounce 期间可能被 stop，不要再继续处理
+                if self._should_stop():
+                    break
 
                 # 重新取最新快照
                 snapshot = self._mgr.snapshot()
@@ -423,13 +427,18 @@ class SingleChatManagerV2:
 
         # ── 2. 拼 prompt → 调 agent ──
         user_text = self._merge_batch_to_prompt_text(batch)
-        full_prompt = user_text
         if self._context_prefix:
             full_prompt = (
                 f"{self._context_prefix}\n\n"
-                f"请使用 memory_search 搜索近期的原生日记作为补充背景信息。\n\n"
+                f"你可以使用 memory_search 搜索近期的原生日记作为补充背景信息。\n\n"
                 f"## 用户新消息\n"
-                f"{user_text}"
+                f"{user_text}\n\n"
+                f"请回复用户的新消息。"
+            )
+        else:
+            full_prompt = (
+                f"{user_text}\n\n"
+                f"请回复用户的新消息。"
             )
 
         _log_line(f"🤖 调 OpenClaw agent "
@@ -439,7 +448,7 @@ class SingleChatManagerV2:
         reply = generate_reply(
             full_prompt,
             session_id=self._session_id,
-            timeout=180,
+            timeout=_AGENT_TIMEOUT,
         )
 
         # ── 3. Done 表情 + 删 Typing ──
@@ -491,7 +500,7 @@ class SingleChatManagerV2:
         pppc_raw = generate_reply(
             prompt,
             session_id=self._session_id,
-            timeout=60,
+            timeout=_PPPC_TIMEOUT,
         )
 
         if pppc_raw:
@@ -509,7 +518,7 @@ class SingleChatManagerV2:
         generate_reply(
             "/new",
             session_id=self._session_id,
-            timeout=15,
+            timeout=_DIARY_TIMEOUT,
         )
         _log_line(f"✅ 原生日记保存已触发", c, self._log_file)
 
