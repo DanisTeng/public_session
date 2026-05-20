@@ -145,11 +145,10 @@ Public Session 有两套记忆机制，职责分离：
 
 ### 原生日记（OpenClaw Native Memory）
 - **用途**：走 OpenClaw 原生记忆链路，供 memory_search 检索
-- **存储**：`~/.openclaw/workspace/memory/YYYY-MM-DD.md`（OpenClaw 原生日记目录）
-- **内容**：主 session 生成的抽象摘要，标头 `## Public Session - {name}`
-- **写入**：finalize 时调主 session 的 `generate_reply` 生成总结性摘要，追加到日记文件
-- **归档**：写入后调 `openclaw memory promote --apply` 将短期候选提升为长期记忆
-- **索引**：promote 后 `openclaw memory search` 可检索，下次 init 的提示词会引导 agent 用 memory_search 补充背景
+- **存储**：由主 session 自己管理路径
+- **内容**：主 session 生成的抽象摘要
+- **写入**：finalize 时给主 session 发一条指令消息，主 session 自行处理记忆写入和归档
+- **索引**：下次 init 的提示词会引导 agent 用 memory_search 补充背景
 
 ### 两种记忆的分工
 | | PPPC | 原生日记 |
@@ -157,7 +156,7 @@ Public Session 有两套记忆机制，职责分离：
 | 谁写的 | Python 直接格式化 | 主 session (AI) 总结 |
 | 内容 | 原始对话 | 抽象摘要 |
 | 用途 | 跨对话上下文（无中断感） | memory_search / 长期记忆 |
-| 存储位置 | public_session 项目内 | OpenClaw workspace memory |
+| 存储位置 | public_session 项目内 | 主 session 自行管理 |
 
 ## 设计原则
 
