@@ -464,12 +464,16 @@ class SingleChatManagerV2:
             if dr.get("code") != 0:
                 _log_line(f"⚠️  mark_done failed: {dr}", c, self._log_file)
 
-        # ── 4. 发送回复 ──
+        # ── 4. 发送回复或标记异常 ──
         if reply:
             _log_line(f"💬 agent 回复 ({len(reply)} chars)", c, self._log_file)
             self._mgr.send_text(c.sender_id, reply)
         else:
-            _log_line(f"⚠️  agent 无回复（超时或失败）", c, self._log_file)
+            _log_line(f"⚠️  agent 无回复（超时或失败），标记 No 表情", c, self._log_file)
+            last_msg = batch[-1]
+            err_react = self._mgr.react(last_msg.message_id, emoji="No")
+            if err_react.get("code") != 0:
+                _log_line(f"⚠️  No 表情标记失败: {err_react}", c, self._log_file)
 
     @staticmethod
     def _merge_batch_to_prompt_text(batch: list) -> str:
