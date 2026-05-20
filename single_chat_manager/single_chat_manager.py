@@ -102,22 +102,65 @@ def _save_last_processed(config, lp: dict[str, str]):
         json.dump(lp, f, indent=2)
 
 
-def _read_pppc_file(workspace_root: str, open_id: str) -> str:
-    """读取某个 sender 今日的 PPPC 文件。
+def _read_pppc_files(workspace_root: str, open_id: str,
+                       max_chars: int = _PPPC_MAX_CHARS) -> str:
+    """读取某个 sender 的所有 PPPC 文件，按时间逆序拼接不超过 max_chars。
 
-    文件路径: {workspace_root}/memory/public-session/{open_id}/YYYY-MM-DD.md
+    Args:
+        workspace_root: 工作区根目录
+        open_id: 发送者 open_id
+        max_chars: 最大字符数限制
 
     Returns:
-        文件内容字符串，文件不存在时返回空字符串。
+        拼接后的最近对话文本，不超过 max_chars 字符。
     """
-    date_str = datetime.now(HKT).strftime("%Y-%m-%d")
-    path = os.path.join(
-        workspace_root, "memory", "public-session", open_id, f"{date_str}.md")
-    try:
-        with open(path) as f:
-            return f.read().strip()
-    except (OSError, FileNotFoundError):
+    pppc_dir = os.path.join(
+        workspace_root, "memory", "public-session", open_id)
+    if not os.path.isdir(pppc_dir):
         return ""
+
+    try:
+        files = sorted(os.listdir(pppc_dir), reverse=True)
+    except OSError:
+        return ""
+
+    segments: list[str] = []
+    total = 0
+    for fname in files:
+        if not fname.endswith(".md"):
+            continue
+        path = os.path.join(pppc_dir, fname)
+        try:
+            with open(path) as f:
+                content = f.read().strip()
+        except OSError:
+            continue
+        if not content:
+            continue
+
+        if total + len(content) > max_chars:
+            # 截取这个文件的一部分
+            room = max_chars - total
+            if room > 0:
+                segments.append(content[:room])
+            break
+
+        segments.append(content)
+        total += len(content)
+
+    if not segments:
+        return ""
+
+    # segments 是最新的在前，拼接时最新的放最后（更自然）
+    segments.reverse()
+    separator = f"\n{'─'*40}\n"
+    text = separator.join(segments)
+
+    # 如果超过限制（因为 separator 可能超出一点点）
+    if len(text) > max_chars:
+        text = text[-max_chars:]
+
+    return text
 
 
 # ── SingleChatManager ──────────────────────────────────────────────────
@@ -230,7 +273,7 @@ class SingleChatManager:
         Returns:
             原始对话文本，无文件时返回空字符串。
         """
-        raw = _read_pppc_file(self._workspace_root, c.sender_id)
+        raw = _read_pppc_files(self._workspace_root, c.sender_id)
         if not raw:
             return ""
 
@@ -270,11 +313,11 @@ class SingleChatManager:
             self._workspace_root, "memory", "public-session", open_id)
 
     def _write_pppc_raw(self, open_id: str, content: str) -> Optional[str]:
-        """将原始对话文本写入 PPPC 文件。"""
-        date_str = datetime.now(HKT).strftime("%Y-%m-%d")
+        """将原始对话文本写入 PPPC 文件（按对话时间命名）。"""
+        ts = datetime.now(HKT).strftime("%Y-%m-%d_%H%M%S")
         pppc_dir = self._get_pppc_dir(open_id)
         os.makedirs(pppc_dir, exist_ok=True)
-        path = os.path.join(pppc_dir, f"{date_str}.md")
+        path = os.path.join(pppc_dir, f"{ts}.md")
 
         try:
             with open(path, "w") as f:
