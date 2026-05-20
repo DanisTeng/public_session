@@ -131,6 +131,33 @@ python3 test_message_manager.py
 - OneTick 只读，SingleChatManager 读写
 - 作为进程重启的持久化断点
 
+## 记忆系统
+
+Public Session 有两套记忆机制，职责分离：
+
+### PPPC（Per-Person Public Context）
+- **用途**：保持对话连续性，让 agent 感觉聊天没中断
+- **存储**：`memory/public-session/{open_id}/{timestamp}.md`
+- **内容**：原始对话全文（用户说啥 + AI 回啥），不做抽象总结
+- **写入**：finalize 时 Python 直接格式化最近一次对话的消息并写入
+- **加载**：init 时按文件名逆序读取该 sender 的所有 PPPC 文件，拼接不超过 ~1000 chars
+- **生命周期**：每次对话独立文件，不覆盖、不删除
+
+### 原生日记（OpenClaw Native Memory）
+- **用途**：走 OpenClaw 原生记忆链路，供 memory_search 检索
+- **存储**：由主 session 自己管理路径
+- **内容**：主 session 生成的抽象摘要
+- **写入**：finalize 时给主 session 发一条指令消息，主 session 自行处理记忆写入和归档
+- **索引**：下次 init 的提示词会引导 agent 用 memory_search 补充背景
+
+### 两种记忆的分工
+| | PPPC | 原生日记 |
+|---|---|---|
+| 谁写的 | Python 直接格式化 | 主 session (AI) 总结 |
+| 内容 | 原始对话 | 抽象摘要 |
+| 用途 | 跨对话上下文（无中断感） | memory_search / 长期记忆 |
+| 存储位置 | public_session 项目内 | 主 session 自行管理 |
+
 ## 设计原则
 
 - **OneTick = 唯一入口**：所有业务逻辑在 OneTick 内，外部不关心内部状态
