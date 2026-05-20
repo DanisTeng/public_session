@@ -34,6 +34,7 @@ _DEBOUNCE_SECONDS = 1       # 发现新消息后等 1 秒再处理
 _LOG_ID_TRIM = 18           # 日志中 message_id 截断长度
 _SESSION_ID_PREFIX = "public-session-"  # OpenClaw session ID 前缀，per sender
 _PPPC_MAX_CHARS = 1000      # PPPC 文件保留最近多少字符
+_DIARY_GEN_TIMEOUT = 30    # 主 session 生成日记摘要超时（秒）
 _PROMOTE_TIMEOUT = 30      # openclaw memory promote 超时（秒）
 
 HKT = timezone(timedelta(hours=8))
@@ -363,7 +364,7 @@ class SingleChatManager:
         result = generate_reply(
             prompt,
             session_id=self._session_id,
-            timeout=30,
+            timeout=_DIARY_GEN_TIMEOUT,
         )
         if result and result.strip():
             return result.strip()
