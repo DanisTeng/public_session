@@ -315,7 +315,6 @@ class SingleChatManager:
         return os.path.join(
             self._workspace_root, "memory", "public-session", open_id)
 
-    @staticmethod
     def _build_diary_entry(self, c: Candidate) -> str:
         """调主 session 生成原生日记摘要。
 
