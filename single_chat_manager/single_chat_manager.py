@@ -319,38 +319,55 @@ class SingleChatManager:
         return os.path.join(
             self._workspace_root, "memory", "public-session", open_id)
 
-    def _build_diary_entry(self, c: Candidate) -> str:
-        """生成一条原生日记条目。
+    @staticmethod
+    def _build_diary_prompt(name: str, msg_count: int,
+                             timed_out: bool) -> str:
+        """构建让主 session 生成原生日记摘要的 prompt。
 
-        OpenClaw memory promote 读取 memory/YYYY-MM-DD.md 中的记录
-        作为短期记忆候选，格式参考 OpenClaw 自动生成的原生日记。
+        输出格式是一段 markdown，用于追加到 memory/YYYY-MM-DD.md。
+        OpenClaw memory promote 会从该文件中读取短期候选。
         """
-        name = c.sender_name or c.sender_id
-        msg_count = self._result.message_count
-        timed_out = self._result.timed_out
+        timeout_note = "（会话因超时结束）" if timed_out else ""
+        return (
+            f"## 指令\n"
+            f"请根据本次对话的内容，为 {name} 在 public session 中的对话"
+            f"生成一段简洁的原生日记摘要。\n"
+            f"\n"
+            f"## 对话信息\n"
+            f"- 参与者: {name}\n"
+            f"- 处理消息数: {msg_count}\n"
+            f"{'- 状态: ' + timeout_note + chr(10) if timeout_note else ''}"
+            f"\n"
+            f"## 输出格式\n"
+            f"请只输出以下格式的日记条目，不要包含其他任何内容：\n"
+            f"\n"
+            f"## Public Session - {name}\n"
+            f"\n"
+            f"{{1-3 句话描述对话主题和关键内容}}\n"
+            f"\n"
+            f"如果本次对话没有值得记录的内容，只输出空行。"
+        )
 
-        lines = [f"## Public Session - {name}"]
-        lines.append("")
-        lines.append(
-            f"{name} 与 public session 进行了对话")
-        if timed_out:
-            lines.append("（会话因超时结束）")
-        lines.append("")
+    def _build_diary_entry(self, c: Candidate) -> str:
+        """调主 session 生成原生日记摘要。
 
-        # 抽取对话摘要（取 processed_msgs 中最后几轮的原始文字）
-        if self._result.processed_msgs:
-            lines.append("### 对话内容")
-            lines.append("")
-            # 最多显示最近 5 轮
-            tail = self._result.processed_msgs[-5:]
-            for speaker, text, reply in tail:
-                preview = text[:100].replace("\n", " ")
-                lines.append(f"- {speaker}: {preview}")
-            lines.append("")
-            lines.append(
-                f"本次会话共处理 {msg_count} 条消息。")
-
-        return "\n".join(lines)
+        Returns:
+            日记 markdown 文本（可能为空），调用方负责写入文件。
+        """
+        prompt = self._build_diary_prompt(
+            c.sender_name or c.sender_id,
+            self._result.message_count,
+            self._result.timed_out,
+        )
+        _log_line(f"📝 Diary: 调主 session 生成日记摘要...", c, self._log_file)
+        result = generate_reply(
+            prompt,
+            session_id=self._session_id,
+            timeout=30,
+        )
+        if result and result.strip():
+            return result.strip()
+        return ""
 
     def _write_pppc_raw(self, open_id: str, content: str) -> Optional[str]:
         """将原始对话文本写入 PPPC 文件（按对话时间命名）。"""
