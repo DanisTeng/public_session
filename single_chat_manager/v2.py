@@ -32,6 +32,7 @@ from typing import Optional
 from config import CachedTokenProvider
 from message_manager import MessageManager
 from scheduler import Candidate
+from single_chat_manager.single_chat_manager import _load_last_processed
 from util.openclaw import generate_reply
 
 # ── 常量 ────────────────────────────────────────────────────────────────
@@ -303,13 +304,16 @@ class SingleChatManagerV2:
 
         # ── 开始会话 ──
         name = c.sender_name or c.sender_id
-        _log_line(f"[chat {name}] 📞 开始会话 (v2, pp={len(pppc)}chars)",
+
+        # 从持久化文件读上次处理断点，避免 new run 重复处理旧消息
+        last_msg_id = _load_last_processed(self._config).get(c.sender_id)
+        _log_line(f"[chat {name}] 📞 开始会话 (v2, pp={len(pppc)}chars, "
+                  f"last={last_msg_id[:_LOG_ID_TRIM] if last_msg_id else 'none'})",
                   c, self._log_file)
 
         # v2 不发送打招呼消息
 
         last_activity = time.time()
-        last_msg_id: Optional[str] = None
 
         while True:
             if self._should_stop():
@@ -333,8 +337,13 @@ class SingleChatManagerV2:
                 new_msgs = self._filter_new_messages(my_msgs, last_msg_id)
 
                 if new_msgs:
+                    _log_line(f"📦 开始处理 batch ({len(new_msgs)} 条, "
+                              f"last_msg_id={last_msg_id[:_LOG_ID_TRIM] if last_msg_id else 'none'})",
+                              c, self._log_file)
                     last_msg_id = new_msgs[-1].message_id
                     self._process_batch(c, new_msgs)
+                    # 每批处理后即时持久化，异常退出也不会丢进度
+                    _sync_last_processed(self._config, c.sender_id, last_msg_id)
                     self._result.message_count += len(new_msgs)
                     last_activity = time.time()
                     continue
@@ -348,12 +357,6 @@ class SingleChatManagerV2:
                 break
 
             time.sleep(_POLL_INTERVAL)
-
-        # ── 同步 last_processed：让调度器知道我们已经处理到哪 ──
-        if last_msg_id is not None:
-            _sync_last_processed(self._config, c.sender_id, last_msg_id)
-            _log_line(f"📝 已持久化 last_processed: {last_msg_id[:_LOG_ID_TRIM]}...",
-                      c, self._log_file)
 
         # ── Finalize: PPPC 摘要 + 原生日记 ──
         self._finalize(c)
