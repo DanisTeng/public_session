@@ -122,6 +122,7 @@ def run_loop(config: Config):
         app_secret=config.resolved_app_secret,
         mark_get_on_receive=False,  # typing/done 由 SingleChatManager 管理
         log_file=config.log_file,
+        file_storage_dir=config.file_storage_dir,
     )
     mgr.start()
 

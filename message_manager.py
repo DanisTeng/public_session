@@ -17,7 +17,9 @@ import time
 from datetime import datetime
 from typing import Callable, Optional
 
-from util.feishu import get_token, send_text_message, _request, react_message, delete_reaction, get_reactions
+from util.feishu import (get_token, send_text_message, _request,
+                          react_message, delete_reaction, get_reactions,
+                          download_resource)
 
 logger = logging.getLogger("message_manager")
 
@@ -27,6 +29,10 @@ _LOG_ID_TRIM = 18      # 日志中 message_id 截断长度
 _LOG_SENDER_ID_TRIM = 12   # 日志中 sender_id 截断长度
 _LOG_SENDER_ID_FULL = 24   # 日志中 sender_id 完整显示长度
 _LOG_TEXT_TRIM = 30        # 日志中消息文本截断长度
+
+# ── 文件相关常量 ───────────────────────────────────────────────
+
+_FILE_DOWNLOAD_TIMEOUT = 60   # 下载文件超时（秒）
 
 
 # ── NameResolver ────────────────────────────────────────────────────────
@@ -177,6 +183,7 @@ class MessageManager:
         mark_get_on_receive: bool = False,
         log_file: str = "",
         log_to_stdout: bool = True,
+        file_storage_dir: str = "",
     ):
         self._app_id = app_id
         self._app_secret = app_secret
@@ -186,6 +193,7 @@ class MessageManager:
         self._mark_get_on_receive = mark_get_on_receive
         self._log_file = log_file
         self._log_to_stdout = log_to_stdout
+        self._file_storage_dir = file_storage_dir
         self._ws_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
 
@@ -289,6 +297,7 @@ class MessageManager:
 
     @staticmethod
     def _extract_text(msg_obj) -> str:
+        """从文本消息对象中提取纯文本内容。"""
         raw = getattr(msg_obj, 'content', '')
         if not raw:
             return ""
@@ -299,6 +308,110 @@ class MessageManager:
             return str(parsed)
         except (json.JSONDecodeError, TypeError):
             return str(raw)
+
+    def _ts(self) -> str:
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def _log_line(self, line: str):
+        """写日志到 stdout 和/或文件。"""
+        if self._log_to_stdout:
+            print(line, flush=True)
+        if self._log_file:
+            od = os.path.dirname(self._log_file)
+            if od:
+                os.makedirs(od, exist_ok=True)
+            with open(self._log_file, "a") as f:
+                f.write(line + "\n")
+
+    def _get_file_storage_dir(self) -> str:
+        """获取文件存储目录，不存在时自动创建。"""
+        d = self._file_storage_dir
+        if not d:
+            log_dir = os.path.dirname(self._log_file) if self._log_file else "."
+            parent = os.path.dirname(os.path.normpath(log_dir))
+            d = os.path.join(parent, "received_files")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def _build_file_output_path(self, storage_dir: str, sender_id: str,
+                                file_name: str, message_id: str) -> str:
+        """构造文件下载路径。
+
+        received_files/
+          └── ou_xxx/
+              └── 2026-05-21/
+                  └── om_xxx_xxx.pdf
+        """
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        safe_name = file_name if file_name else "unknown_file"
+        return os.path.join(storage_dir, sender_id, date_str,
+                            f"{message_id}_{safe_name}")
+
+    def _download_and_store_file(self, msg_obj, message_id: str, msg_type: str,
+                                  sender_id: str, sender_name: str):
+        """下载非文本消息的资源文件到本地，不回写 MessageTable。
+
+        文件只存不表（table 只放文本消息），由 agent 在对话中按需翻找。
+        同一个 message_id 不会重复下载（已存在的路径直接跳过）。
+
+        成功：日志记录 "📎 sender: received xxx.pdf -> /path"
+        失败：日志记录 "⚠️ sender: download failed: reason"
+        """
+        raw = getattr(msg_obj, 'content', '')
+        if not raw:
+            self._log_line(f"[{self._ts()}] ⚠️  {sender_name}: 文件消息无 content (type={msg_type}), id={message_id[:_LOG_ID_TRIM]}")
+            return
+
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            self._log_line(f"[{self._ts()}] ⚠️  {sender_name}: 文件消息 content 解析失败 (type={msg_type}), id={message_id[:_LOG_ID_TRIM]}")
+            return
+
+        if not isinstance(parsed, dict):
+            self._log_line(f"[{self._ts()}] ⚠️  {sender_name}: 文件消息 content 非 dict (type={msg_type}), id={message_id[:_LOG_ID_TRIM]}")
+            return
+
+        file_key = parsed.get("file_key", "") or ""
+        image_key = parsed.get("image_key", "") or ""
+        file_name = parsed.get("file_name", "") or "unknown"
+
+        if not file_key and not image_key:
+            self._log_line(f"[{self._ts()}] ⚠️  {sender_name}: 文件消息无 file_key/image_key (type={msg_type}), id={message_id[:_LOG_ID_TRIM]}")
+            return
+
+        key = file_key if file_key else image_key
+        resource_type = "file" if file_key else "image"
+
+        storage_dir = self._get_file_storage_dir()
+        output_path = self._build_file_output_path(storage_dir, sender_id,
+                                                    file_name, message_id)
+
+        # 去重：已存在的文件不重复下载
+        if os.path.exists(output_path):
+            size_kb = os.path.getsize(output_path) / 1024
+            self._log_line(f"[{self._ts()}] 📎  {sender_name}: 文件已存在 (跳过) {file_name} ({size_kb:.1f}KB) -> {output_path}")
+            return
+
+        token = get_token(self._app_id, self._app_secret)
+        if not token:
+            self._log_line(f"[{self._ts()}] ⚠️  {sender_name}: 下载文件失败 (token), id={message_id[:_LOG_ID_TRIM]}")
+            return
+
+        result = download_resource(
+            message_id, key, token,
+            resource_type=resource_type,
+            output_path=output_path,
+            timeout=_FILE_DOWNLOAD_TIMEOUT,
+        )
+
+        if result.get("code") == 0:
+            size_kb = result.get("size", 0) / 1024
+            path = result.get("path", output_path)
+            self._log_line(f"[{self._ts()}] 📎  {sender_name}: 收到文件 {file_name} ({size_kb:.1f}KB) -> {path}")
+        else:
+            error_msg = result.get("msg", "未知错误")
+            self._log_line(f"[{self._ts()}] ⚠️  {sender_name}: 文件 {file_name} 下载失败: {error_msg}")
 
     def _ws_loop(self):
         try:
@@ -338,6 +451,9 @@ class MessageManager:
         if not message_id:
             return
 
+        msg_type = getattr(msg_obj, 'message_type', '') or ''
+        create_time = getattr(msg_obj, 'create_time', '0')
+
         # sender 信息在 event.sender 上，不在 message.sender 里
         event_sender = getattr(event, 'sender', None)
         sender_id = ''
@@ -353,9 +469,6 @@ class MessageManager:
             )
             return
 
-        text = self._extract_text(msg_obj)
-        create_time = getattr(msg_obj, 'create_time', '0')
-
         sender_name = self._name_resolver.resolve(sender_id)
         if not sender_name:
             logger.error(
@@ -364,31 +477,29 @@ class MessageManager:
             )
             return
 
-        msg = self._table.add(message_id, sender_id, text, create_time, sender_name)
+        if msg_type == "text":
+            # ── 文本消息：写入 MessageTable（供 OneTick 消费）──
+            text = self._extract_text(msg_obj)
+            msg = self._table.add(message_id, sender_id, text, create_time,
+                                  sender_name)
 
-        # ── log incoming message ──
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        preview = msg.text[:10].replace("\n", " ")
-        line = f"[{ts}] 📩 {msg.sender_name}: {preview}... [{len(msg.text)}chars]"
-        if self._log_to_stdout:
-            print(line, flush=True)
-        if self._log_file:
-            od = os.path.dirname(self._log_file)
-            if od:
-                os.makedirs(od, exist_ok=True)
-            with open(self._log_file, "a") as f:
-                f.write(line + "\n")
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            preview = msg.text[:10].replace("\n", " ")
+            self._log_line(f"[{ts}] 📩 {msg.sender_name}: {preview}... [{len(msg.text)}chars]")
 
-        # optional callback for event-driven consumers
-        # auto-reply with Get reaction when enabled
-        if self._mark_get_on_receive:
-            try:
-                self.react(message_id, emoji="Get")
-            except Exception as e:
-                logger.error(f"auto Get reaction failed: {e}")
+            # optional callback & auto-reaction
+            if self._mark_get_on_receive:
+                try:
+                    self.react(message_id, emoji="Get")
+                except Exception as e:
+                    logger.error(f"auto Get reaction failed: {e}")
 
-        if self._on_message:
-            try:
-                self._on_message(msg)
-            except Exception as e:
-                logger.error(f"on_message callback failed: {e}")
+            if self._on_message:
+                try:
+                    self._on_message(msg)
+                except Exception as e:
+                    logger.error(f"on_message callback failed: {e}")
+        else:
+            # ── 非文本消息：只存文件，不入 MessageTable ──
+            self._download_and_store_file(msg_obj, message_id, msg_type,
+                                          sender_id, sender_name)
