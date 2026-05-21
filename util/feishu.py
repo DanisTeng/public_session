@@ -5,6 +5,7 @@
 """
 
 import json
+import os
 import urllib.request
 import urllib.error
 
@@ -147,6 +148,75 @@ def get_reactions(msg_id, token, page_size=20):
         f"/im/v1/messages/{msg_id}/reactions?page_size={page_size}",
         token=token,
     )
+
+
+def download_resource(message_id: str, file_key: str, token: str, resource_type: str = "file",
+                       output_path: str = "", timeout: int = 60) -> dict:
+    """同步下载消息中的资源文件到本地。
+
+    Args:
+        message_id: 消息 ID
+        file_key: 资源的 file_key 或 image_key
+        token: tenant_access_token
+        resource_type: 资源类型，"image" 或 "file"（file 类型也适用于 audio/video）
+        output_path: 保存路径，为空时不保存到磁盘
+        timeout: 超时秒数，默认 60s
+
+    Returns:
+        dict: {
+            "code": 0,        # 成功
+            "path": "/xxx",   # 本地文件路径
+            "content_type": "application/pdf",
+            "size": 123456,
+        }
+        失败时返回 {"code": -1, "msg": "错误原因"}
+    """
+    assert token, "download_resource requires a valid token"
+
+    url = f"{API_BASE}/im/v1/messages/{message_id}/resources/{file_key}?type={resource_type}"
+    headers = {"Authorization": f"Bearer {token}"}
+
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read()
+            content_type = resp.headers.get("Content-Type", "")
+            content_length = int(resp.headers.get("Content-Length", len(body)))
+
+            # 大小检查 (100MB = 100 * 1024 * 1024)
+            MAX_SIZE = 100 * 1024 * 1024
+            if content_length > MAX_SIZE:
+                return {
+                    "code": -1,
+                    "msg": f"超出大小限制 ({content_length / 1024 / 1024:.1f}MB > 100MB)",
+                }
+
+            result = {
+                "code": 0,
+                "content_type": content_type,
+                "size": content_length,
+            }
+
+            if output_path:
+                os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                with open(output_path, "wb") as f:
+                    f.write(body)
+                result["path"] = output_path
+
+            return result
+
+    except urllib.error.HTTPError as e:
+        try:
+            detail = e.read().decode("utf-8", errors="replace")[:200]
+        except Exception:
+            detail = str(e)
+        return {"code": -1, "msg": f"HTTP {e.code}: {detail}"}
+    except urllib.error.URLError as e:
+        return {"code": -1, "msg": f"网络错误: {e.reason}"}
+    except OSError as e:
+        return {"code": -1, "msg": f"存储失败: {e}"}
+    except Exception as e:
+        return {"code": -1, "msg": f"下载失败: {str(e)[:200]}"}
 
 
 def list_chats(token, page_size=50):

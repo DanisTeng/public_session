@@ -1,3 +1,6 @@
 __pycache__/
 messages.log
 state/
+memory/
+received_files/
+docs/
