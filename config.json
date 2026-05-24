@@ -3,5 +3,6 @@
   "env_app_secret": "PUBLIC_FEISHU_APP_SECRET",
   "state_dir": "/james_pm/public_session/state",
   "log_file": "/james_pm/public_session/state/messages.log",
-  "stop_file": "/james_pm/public_session/state/.public_session.stop"
+  "stop_file": "/james_pm/public_session/state/.public_session.stop",
+  "file_storage_dir": "/james_pm/public_session/received_files"
 }

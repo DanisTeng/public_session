@@ -189,9 +189,9 @@ class SingleChatManager:
         self._token_provider = token_provider
         self._candidate = candidate
         self._log_file = config.log_file or ""
-        # workspace_root = state_dir/..（约定 state 在 workspace 根下）
         assert config.state_dir, "state_dir 必须在 config 中配置"
         self._workspace_root = os.path.dirname(os.path.normpath(config.state_dir))
+        self._file_storage_dir = getattr(config, 'file_storage_dir', '') or ""
 
         self._result = ChatResult(
             sender_id=candidate.sender_id,
@@ -262,10 +262,11 @@ class SingleChatManager:
     def _build_context_prefix(self, c: Candidate) -> str:
         """构建 init 阶段的前情提要。
 
-        包含三部分：
+        包含四部分：
           1. 对话对象身份说明
           2. 提示使用 memory_search 搜索原生日记
-          3. PPPC 中的原始对话记录
+          3. 对方发送的文件已自动保存到本地（如有文件目录）
+          4. PPPC 中的原始对话记录
         """
         assert c.sender_name, f"sender {c.sender_id} 必须有名"
         name = c.sender_name
@@ -275,6 +276,16 @@ class SingleChatManager:
             "",
             "你可以使用 memory_search 搜索近期的原生日记作为补充背景信息。",
         ]
+
+        # 如果配置了文件存储目录，告知 agent 对方发送的文件已自动存到本地
+        if self._file_storage_dir:
+            file_path = os.path.join(self._file_storage_dir, c.sender_id)
+            parts.extend([
+                "",
+                f"[文件存储] {name} 发送的文件已自动保存到本地，"
+                f"路径: {file_path}/",
+                f"如有需要，可以读取这些文件来获取信息。",
+            ])
 
         raw = _read_pppc_files(self._workspace_root, c.sender_id)
         if raw:

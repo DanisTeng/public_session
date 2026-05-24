@@ -58,12 +58,14 @@ class Config:
         state_dir: 状态文件目录
         log_file: 日志文件路径（可选），不设则不写文件
         stop_file: stop 文件路径
+        file_storage_dir: 文件存储目录（可选），不设则默认 state_dir/../received_files/
     """
     app_id: str = ""
     app_secret: str = ""
     state_dir: str = ""
     log_file: str = ""
     stop_file: str = ""
+    file_storage_dir: str = ""
 
     @property
     def resolved_app_id(self) -> str:
