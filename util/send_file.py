@@ -21,7 +21,6 @@ send_file.py — 通过飞书 bot 发送文件给指定用户
 """
 
 import json
-import mimetypes
 import os
 import sys
 import urllib.request
@@ -147,13 +146,13 @@ def upload_file(token: str, file_path: str) -> dict:
     if ext not in SUPPORTED_EXTENSIONS:
         return {"code": -1, "msg": f"不支持的文件格式: {ext} (支持: {list(SUPPORTED_EXTENSIONS)[:10]}...)"}
 
-    # 大小检查 (50MB)
+    # 大小检查 (100MB)
     file_size = os.path.getsize(file_path)
-    MAX_SIZE = 50 * 1024 * 1024
+    MAX_SIZE = 100 * 1024 * 1024
     if file_size > MAX_SIZE:
         return {
             "code": -1,
-            "msg": f"文件过大 ({file_size / 1024 / 1024:.1f}MB > 50MB)",
+            "msg": f"文件过大 ({file_size / 1024 / 1024:.1f}MB > 100MB)",
         }
 
     body, content_type = _build_multipart_body(file_path)
